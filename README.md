@@ -1,218 +1,220 @@
-# 盯盘侠 PanWatch
+# PriceDog
 
-**私有部署的 AI 股票助手** — 实时行情监控、智能技术分析、多账户持仓管理
+PriceDog 是一个基于 Price Action 裸 K 突破策略的行情监控和量化计算项目。项目 fork 自 PanWatch，保留其 Web UI、用户认证、通知、价格提醒和 AI Agent 基础能力，并新增 Rust 计算引擎负责行情数据、技术指标、突破识别和后续回测能力。
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://hub.docker.com/r/sunxiao0721/panwatch)
+当前开发重点是 crypto 实时数据获取和 EMA20 突破量化模型验证。A 股和美股数据源会接入同一 Rust Engine，但 A 股分钟线稳定性暂不作为当前优先级。
 
-![Dashboard](docs/screenshots/dashboard.png)
+## 架构
 
-| 持仓管理 | AI 建议 |
-|:---:|:---:|
-| ![Portfolio](./docs/screenshots/portfolio.png) | ![Suggestion](./docs/screenshots/suggestion.png) |
+PriceDog 使用 Docker Compose 部署多个轻量服务：
 
-<details>
-<summary>移动端截图</summary>
+| 服务 | 端口 | 职责 |
+| --- | --- | --- |
+| `panwatch` | `18000 -> 8000` | Web UI、用户认证、价格提醒、通知、AI Agent 编排 |
+| `price-action-engine` | `8001` | Rust 计算引擎，负责行情获取、K 线缓存、EMA20/ATR、突破信号、信号入库 |
+| `akshare-adapter` | 内部 `8002` | Python AkShare 适配器，提供股票数据 HTTP 接口 |
+| `postgres` | `15432 -> 5432` | 公共 PostgreSQL 服务，PriceDog 使用数据库 `pricedog` |
 
-<img src="./docs/screenshots/mobile.png" width="375" />
+设计原则：
 
-</details>
+- Rust Engine 是核心行情和计算服务。
+- PanWatch Python 层尽量只做 Web、规则、通知和 AI 编排。
+- PostgreSQL 是公共数据库服务，不绑定到单一应用；PriceDog 使用独立数据库名 `pricedog`。
+- 不再使用 SQLite。
+- 默认不安装 Playwright 浏览器，保持服务轻量。
 
-## 为什么选择盯盘侠？
+## 当前能力
 
-- **数据私有** — 自托管部署，持仓数据不经过任何第三方
-- **AI 原生** — 不是简单的指标堆砌，而是让 AI 理解你的持仓、风格和目标
-- **开箱即用** — Docker 一键部署，5 分钟完成配置
+- Crypto 实时行情：OKX WebSocket ticker。
+- Crypto 实时 K 线：OKX WebSocket candle，闭合 K 线写入 PostgreSQL。
+- Crypto 历史 K 线：Binance REST 优先，OKX REST fallback。
+- 股票数据：通过 `akshare-adapter` 获取，后续逐步完善。
+- K 线周期：`5m`、`15m`、`30m`、`1h`、`2h`、`4h`、`1d`。
+- 指标：
+  - EMA20，使用 close 序列计算。
+  - ATR14。
+  - `ema20_position = (close - ema20) / atr14`。
+  - 量比：当前成交量 / 前 20 根平均成交量。
+  - 振幅。
+- 基础突破信号识别。
+- 价格提醒条件支持 `ema20_position` 和 `pattern`。
+- 数据源状态接口：查看 OKX WebSocket 连接状态、最近消息时间和最近闭合 K 线时间。
 
-## 🧠 深度分析 (NEW · TradingAgents 集成)
+## 快速启动
 
-接入 [TradingAgents](https://github.com/TauricResearch/TradingAgents)(76k star)多 Agent 投资决策框架,在持仓页点 🧠 图标即可触发:
-
-- **4 类分析师**(技术 / 情绪 / 新闻 / 基本面) → **看多看空辩论** → **风控** → **PM 整合**
-- 3-5 分钟出完整推理链,推送同步到 Telegram / 微信 / 钉钉
-- 默认 deepseek-chat,单次 ~$0.05;月度预算可控
-- 配置指南: [`.docs/tradingagents/USER_GUIDE.md`](.docs/tradingagents/USER_GUIDE.md)
-
-## 核心功能
-
-<details>
-<summary><b>智能 Agent 系统</b></summary>
-
-| Agent | 触发时机 | 功能 |
-|-------|---------|------|
-| **盘前分析** | 每日开盘前 | 综合隔夜美股、新闻消息、技术形态，给出今日操作策略 |
-| **盘中监测** | 交易时段实时 | 监控异动信号，RSI/KDJ/MACD 共振时推送提醒 |
-| **盘后日报** | 每日收盘后 | 复盘当日走势，分析资金流向，规划次日操作 |
-| **新闻速递** | 定时采集 | 抓取财经新闻，AI 筛选与持仓相关的重要信息 |
-
-</details>
-
-<details>
-<summary><b>专业技术分析</b></summary>
-
-- **趋势指标**：MA 多空排列、MACD 金叉死叉、布林带突破
-- **动量指标**：RSI 超买超卖、KDJ 钝化与背离
-- **量价分析**：量比异动、缩量回调、放量突破
-- **形态识别**：锤子线、吞没形态、十字星等 K 线形态
-- **支撑压力**：自动计算多级支撑位和压力位
-
-</details>
-
-<details>
-<summary><b>多市场 & 多账户</b></summary>
-
-- **覆盖市场**：A 股、港股、美股实时行情
-- **账户管理**：支持多券商账户独立管理，汇总展示总资产
-- **交易风格**：按短线/波段/长线分别设置，AI 建议更精准
-
-</details>
-
-<details>
-<summary><b>全渠道通知</b></summary>
-
-Telegram / 企业微信 / 钉钉 / 飞书 / Bark / 自定义 Webhook
-
-</details>
-
-<details>
-<summary><b>价格提醒</b></summary>
-
-- 支持价格、涨跌幅、成交额、量比等条件组合（AND / OR）
-- 支持交易时段/全天生效、冷却时间、日触发上限、重复触发模式
-- 到期时间使用弹窗内日期面板 + `HH:mm` 输入，留空表示永不过期
-- 可按规则选择通知渠道，不选则走系统默认渠道
-
-</details>
-
-## 快速开始
+复制环境变量模板：
 
 ```bash
-docker run -d \
-  --name panwatch \
-  -p 8000:8000 \
-  -v panwatch_data:/app/data \
-  sunxiao0721/panwatch:latest
+cp .env.example .env
 ```
 
-访问 `http://localhost:8000`，首次使用设置账号密码即可。
-
-说明：镜像内已包含 Playwright 运行所需的系统依赖；Chromium 浏览器会在容器首次启动时自动下载并安装到挂载卷（默认 `/app/data/playwright`），首次启动可能需要几分钟且需要网络可达。
-
-如果不需要截图等浏览器能力，可以在启动容器时设置 `PLAYWRIGHT_SKIP_BROWSER_INSTALL=1` 跳过首次 Chromium 下载/安装。
-
-<details>
-<summary>Docker Compose</summary>
-
-```yaml
-version: '3.8'
-services:
-  panwatch:
-    image: sunxiao0721/panwatch:latest
-    container_name: panwatch
-    ports:
-      - "8000:8000"
-    volumes:
-      - panwatch_data:/app/data
-    restart: unless-stopped
-
-volumes:
-  panwatch_data:
-```
+启动全部服务：
 
 ```bash
-docker-compose up -d
+docker compose up --build
 ```
 
-</details>
+访问：
 
-<details>
-<summary>环境变量</summary>
+- Web UI: `http://127.0.0.1:18000`
+- Rust Engine: `http://127.0.0.1:8001`
+- PostgreSQL: `127.0.0.1:15432`
 
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `AUTH_USERNAME` | 预设登录用户名 | 首次访问时设置 |
-| `AUTH_PASSWORD` | 预设登录密码 | 首次访问时设置 |
-| `JWT_SECRET` | JWT 签名密钥 | 自动生成 |
-| `DATA_DIR` | 数据存储目录 | `./data` |
-| `TZ` | 应用时区（影响 Agent 调度触发时间与时间展示） | `Asia/Shanghai` |
-| `PLAYWRIGHT_SKIP_BROWSER_INSTALL` | 跳过首次 Chromium 安装（不需要截图时可用） | 未设置 |
-| `LOG_LEVEL` | 控制台日志级别。默认 `INFO`（只输出业务事件 + 错误）；排查问题时设 `DEBUG` 可看到调度心跳、采集过程等底层日志。UI 日志板始终保留完整记录，不受影响 | `INFO` |
-| `HTTP_PROXY` / `HTTPS_PROXY` / `http_proxy` | 出站 HTTP 代理。三种配置方式任选其一: ① 启动前 `export HTTP_PROXY=...`；② `.env` 里写 `http_proxy=http://host:port`；③ UI「设置 → 全局 HTTP 代理」。三者优先级:外部环境变量 > UI > `.env`。生效后所有 httpx 客户端走代理。`NO_PROXY` 默认包含 `localhost,127.0.0.1` | 未设置 |
-
-</details>
-
-<details>
-<summary>首次配置</summary>
-
-1. 访问 Web 界面，设置登录账号
-2. **设置 → AI 服务商**：配置 OpenAI 兼容 API（支持 OpenAI / 智谱 / DeepSeek / Ollama 等）
-3. **设置 → 通知渠道**：添加 Telegram 或其他推送渠道
-4. **持仓 → 添加股票**：添加自选股，启用对应 Agent
-
-</details>
-
-<details>
-<summary>本地开发</summary>
-
-**环境要求**：Python 3.10+ / Node.js 18+ / pnpm
+停止服务：
 
 ```bash
-# 一键开发（推荐）
-make dev-api          # 启动后端（自动 venv+依赖，监听 :8000）
-make dev-web          # 启动前端（自动 pnpm install，监听 :5183）
-
-# 或手动
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-python server.py                              # 后端 :8000
-
-cd frontend && pnpm install && pnpm dev       # 前端 :5183
+docker compose down
 ```
 
-前端 dev server 跑在 `http://localhost:5183`，并把 `/api` 代理到 `127.0.0.1:8000`。
-前端用 `:5183` 而非默认 `:5173`，是为了和 BeeCount-Cloud 等本地常驻前端错开。
+## 常用接口
 
-</details>
+健康检查：
 
-<details>
-<summary><b>技术栈</b></summary>
+```bash
+curl http://127.0.0.1:8001/api/v1/health
+```
 
-**后端**：FastAPI / SQLAlchemy / APScheduler / OpenAI SDK
+数据源状态：
 
-**前端**：React 18 / TypeScript / Tailwind CSS / shadcn/ui
+```bash
+curl http://127.0.0.1:8001/api/v1/provider-status
+```
 
-</details>
+实时行情：
 
-<details>
-<summary><b>发布（Docker 镜像）</b></summary>
+```bash
+curl http://127.0.0.1:8001/api/v1/quote/CRYPTO/BTCUSDT
+```
 
-本项目内置 GitHub Actions 发布流程：
+K 线：
 
-- 打 tag（例如 `0.2.3`）会自动构建并推送 Docker 镜像
-  - `sunxiao0721/panwatch:0.2.3`
-  - `sunxiao0721/panwatch:latest`
-- 也支持在 GitHub Actions 里手动触发（workflow_dispatch）指定版本号
+```bash
+curl 'http://127.0.0.1:8001/api/v1/klines/CRYPTO/BTCUSDT?interval=5m&limit=120'
+```
 
-需要在仓库 Secrets 中配置：
+单标的评估：
 
-- `DOCKERHUB_USERNAME`
-- `DOCKERHUB_TOKEN`
+```bash
+curl -X POST http://127.0.0.1:8001/api/v1/evaluate \
+  -H 'Content-Type: application/json' \
+  -d '{"market":"CRYPTO","symbol":"BTCUSDT","interval":"5m"}'
+```
 
-</details>
+批量扫描：
 
-## 捐赠支持
+```bash
+curl -X POST http://127.0.0.1:8001/api/v1/scan \
+  -H 'Content-Type: application/json' \
+  -d '{"items":[{"market":"CRYPTO","symbol":"BTCUSDT"},{"market":"CRYPTO","symbol":"ETHUSDT"}],"interval":"5m","limit":120}'
+```
 
-如果你觉得 PanWatch 有帮助，欢迎请作者喝杯咖啡：
+## 环境变量
 
-| 微信赞赏 | 支付宝 |
-|:---:|:---:|
-| <img src="./docs/donate/wechat.png" width="240" /> | <img src="./docs/donate/alipay.png" width="240" /> |
+核心配置见 `.env.example`。
 
-## 贡献
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PANWATCH_PORT` | `18000` | Web UI 映射端口 |
+| `PRICE_ACTION_ENGINE_URL` | `http://127.0.0.1:8001` | Python 层访问 Rust Engine 的地址 |
+| `PA_ENGINE_PORT` | `8001` | Rust Engine 监听端口 |
+| `AKSHARE_ADAPTER_URL` | `http://127.0.0.1:8002` | 本地开发时 AkShare adapter 地址 |
+| `PA_CRYPTO_WS_ENABLED` | `true` | 是否启用 crypto WebSocket 采集 |
+| `PA_CRYPTO_WS_SYMBOLS` | `BTCUSDT,ETHUSDT` | WebSocket 订阅标的 |
+| `PA_CRYPTO_WS_INTERVALS` | `5m,1h,4h` | WebSocket 订阅 K 线周期 |
+| `PANWATCH_DATABASE_URL` | `postgresql+psycopg://postgres:postgres@postgres:5432/pricedog` | PanWatch Python 使用的数据库连接 |
+| `PA_DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/pricedog` | Rust Engine 使用的数据库连接 |
+| `POSTGRES_DB` | `pricedog` | PriceDog 数据库名 |
+| `POSTGRES_PORT` | `15432` | PostgreSQL 宿主机映射端口 |
+| `INSTALL_SCREENSHOT` | `false` | 是否安装截图相关依赖 |
+| `INSTALL_TRADINGAGENTS` | `false` | 是否安装 TradingAgents 深度分析依赖 |
+| `PLAYWRIGHT_SKIP_BROWSER_INSTALL` | `1` | 默认跳过浏览器安装 |
 
-欢迎提交 Issue 和 PR！自定义 Agent 和数据源开发请参考 [贡献指南](CONTRIBUTING.md)。
-社区交流（Telegram）：[t.me/panwatch](https://t.me/panwatch)
+## 本地开发
+
+Python 后端：
+
+```bash
+make setup-backend
+make dev-api
+```
+
+Rust Engine：
+
+```bash
+make dev-engine
+```
+
+前端：
+
+```bash
+make dev-web
+```
+
+Docker Compose：
+
+```bash
+make compose-up
+make compose-down
+```
+
+## 测试
+
+Rust Engine：
+
+```bash
+cd price-action-engine
+cargo fmt -- --check
+cargo test
+```
+
+Python：
+
+```bash
+make test
+```
+
+## 数据库
+
+PostgreSQL 由 Compose 独立启动：
+
+```text
+postgres://postgres:postgres@127.0.0.1:15432/pricedog
+```
+
+Rust Engine 当前会初始化 PriceDog 自己需要的表：
+
+- `pa_kline`
+- `pa_signal`
+
+项目按“新项目直接 PostgreSQL 初始化”的方式开发，不保留 SQLite 迁移路径。
+
+## 开发路线
+
+Phase 1：
+
+- 完善 crypto WebSocket 采集。
+- 验证 EMA20 + ATR + 量价突破模型。
+- 完善数据源状态、缓存、异常降级。
+- 让价格提醒稳定接入 Rust Engine 指标。
+
+Phase 2：
+
+- 形态识别。
+- 更完整的 Price Action 场景分类。
+- Telegram 信号推送。
+
+Phase 3：
+
+- 回测引擎。
+- 绩效统计。
+- 前端回测页面。
+
+## 代码仓库
+
+```text
+git@github.com:leilinen/pricedog.git
+```
 
 ## License
 
-[MIT](LICENSE)
+MIT
