@@ -80,6 +80,12 @@ curl http://127.0.0.1:8001/api/v1/health
 curl http://127.0.0.1:8001/api/v1/provider-status
 ```
 
+K 线数据健康检查：
+
+```bash
+curl 'http://127.0.0.1:8001/api/v1/data-health/CRYPTO/BTCUSDT?interval=5m&limit=120'
+```
+
 实时行情：
 
 ```bash
@@ -121,6 +127,9 @@ curl -X POST http://127.0.0.1:8001/api/v1/scan \
 | `PA_CRYPTO_WS_ENABLED` | `true` | 是否启用 crypto WebSocket 采集 |
 | `PA_CRYPTO_WS_SYMBOLS` | `BTCUSDT,ETHUSDT` | WebSocket 订阅标的 |
 | `PA_CRYPTO_WS_INTERVALS` | `5m,1h,4h` | WebSocket 订阅 K 线周期 |
+| `PA_CRYPTO_BACKFILL_ENABLED` | `true` | 是否启用 crypto K 线 REST 自动回补 |
+| `PA_CRYPTO_BACKFILL_INTERVAL_SEC` | `60` | 回补检查间隔，最低建议 60 秒 |
+| `PA_CRYPTO_BACKFILL_LOOKBACK` | `120` | 每次回补检查的近端 K 线窗口 |
 | `PANWATCH_DATABASE_URL` | `postgresql+psycopg://postgres:postgres@postgres:5432/pricedog` | PanWatch Python 使用的数据库连接 |
 | `PA_DATABASE_URL` | `postgres://postgres:postgres@postgres:5432/pricedog` | Rust Engine 使用的数据库连接 |
 | `POSTGRES_DB` | `pricedog` | PriceDog 数据库名 |

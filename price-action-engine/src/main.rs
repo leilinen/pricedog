@@ -117,6 +117,18 @@ struct KlineQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct DataHealthQuery {
+    interval: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SourceCount {
+    source: String,
+    rows: i64,
+}
+
+#[derive(Debug, Deserialize)]
 struct EvaluateRequest {
     market: String,
     symbol: String,
@@ -205,10 +217,12 @@ async fn main() -> Result<()> {
         provider_status: Arc::new(RwLock::new(HashMap::new())),
     });
     start_crypto_ws_collectors(state.clone());
+    start_crypto_kline_backfill_monitor(state.clone());
 
     let app = Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/provider-status", get(get_provider_status))
+        .route("/api/v1/data-health/:market/:symbol", get(get_data_health))
         .route("/api/v1/klines/:market/:symbol", get(get_klines))
         .route("/api/v1/quote/:market/:symbol", get(get_quote))
         .route("/api/v1/evaluate", post(evaluate))
@@ -306,6 +320,29 @@ async fn mark_provider_closed_kline(state: &AppState, provider: &str, market: &s
     });
     entry.status = "connected".to_string();
     entry.last_closed_kline_at = Some(now);
+}
+
+async fn mark_provider_error(
+    state: &AppState,
+    provider: &str,
+    market: &str,
+    channel: &str,
+    error: String,
+) {
+    let key = provider_status_key(provider, market, channel);
+    let mut statuses = state.provider_status.write().await;
+    let entry = statuses.entry(key).or_insert_with(|| ProviderStatus {
+        provider: provider.to_string(),
+        market: market.to_string(),
+        channel: channel.to_string(),
+        status: "degraded".to_string(),
+        last_connected_at: None,
+        last_message_at: None,
+        last_closed_kline_at: None,
+        last_error: None,
+    });
+    entry.status = "degraded".to_string();
+    entry.last_error = Some(error);
 }
 
 async fn mark_provider_disconnected(
@@ -411,6 +448,45 @@ fn start_crypto_ws_collectors(state: Arc<AppState>) {
     });
 }
 
+fn start_crypto_kline_backfill_monitor(state: Arc<AppState>) {
+    let enabled = env::var("PA_CRYPTO_BACKFILL_ENABLED")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true);
+    if !enabled {
+        info!("crypto kline backfill monitor disabled");
+        return;
+    }
+    let symbols = crypto_ws_symbols();
+    let intervals = crypto_ws_intervals();
+    if symbols.is_empty() || intervals.is_empty() {
+        info!("crypto kline backfill monitor has no symbols or intervals");
+        return;
+    }
+    let poll_secs = env::var("PA_CRYPTO_BACKFILL_INTERVAL_SEC")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v >= 10)
+        .unwrap_or(60);
+    let lookback = env::var("PA_CRYPTO_BACKFILL_LOOKBACK")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v >= 10)
+        .unwrap_or(120);
+
+    tokio::spawn(async move {
+        loop {
+            if let Err(err) =
+                run_crypto_kline_backfill_once(&state, &symbols, &intervals, lookback).await
+            {
+                mark_provider_error(&state, "okx", "CRYPTO", "kline_backfill", err.to_string())
+                    .await;
+                warn!("crypto kline backfill failed: {err}");
+            }
+            sleep(Duration::from_secs(poll_secs)).await;
+        }
+    });
+}
+
 fn crypto_ws_symbols() -> Vec<String> {
     env::var("PA_CRYPTO_WS_SYMBOLS")
         .unwrap_or_else(|_| "BTCUSDT,ETHUSDT".to_string())
@@ -427,6 +503,66 @@ fn crypto_ws_intervals() -> Vec<String> {
         .map(|s| normalize_interval(s.trim()))
         .filter(|s| okx_ws_candle_channel(s).is_some())
         .collect()
+}
+
+async fn run_crypto_kline_backfill_once(
+    state: &AppState,
+    symbols: &[String],
+    intervals: &[String],
+    lookback: usize,
+) -> Result<()> {
+    mark_provider_connected(state, "okx", "CRYPTO", "kline_backfill").await;
+    let mut updated = 0usize;
+    for symbol in symbols {
+        for interval in intervals {
+            let stored = load_klines_from_db(state, "CRYPTO", symbol, interval, lookback).await?;
+            let Some(reason) = crypto_backfill_reason(&stored, interval) else {
+                continue;
+            };
+            let Some(expected_latest) = expected_latest_closed_ts_millis(interval) else {
+                continue;
+            };
+            let mut bars = fetch_okx_klines(state, symbol, interval, lookback + 2).await?;
+            bars.retain(|bar| parse_ts_millis(&bar.ts).is_some_and(|ts| ts <= expected_latest));
+            if bars.is_empty() {
+                continue;
+            }
+            persist_klines(state, "CRYPTO", symbol, interval, &bars, "okx-backfill").await?;
+            updated += bars.len();
+            info!(
+                "crypto kline backfill {} {} reason={} rows={}",
+                symbol,
+                interval,
+                reason,
+                bars.len()
+            );
+        }
+    }
+    mark_provider_message(state, "okx", "CRYPTO", "kline_backfill").await;
+    if updated > 0 {
+        mark_provider_closed_kline(state, "okx", "CRYPTO", "kline_backfill").await;
+    }
+    Ok(())
+}
+
+fn crypto_backfill_reason(bars: &[Kline], interval: &str) -> Option<String> {
+    let interval_ms = interval_millis(interval)?;
+    if bars.is_empty() {
+        return Some("no_data".to_string());
+    }
+    let expected_latest = expected_latest_closed_ts_millis(interval)?;
+    let latest = bars
+        .iter()
+        .filter_map(|bar| parse_ts_millis(&bar.ts))
+        .max()?;
+    if latest + interval_ms < expected_latest {
+        return Some("stale".to_string());
+    }
+    let gaps = count_missing_kline_slots(bars, interval);
+    if gaps > 0 {
+        return Some(format!("gaps:{gaps}"));
+    }
+    None
 }
 
 async fn run_okx_ticker_ws_once(state: Arc<AppState>, symbols: &[String]) -> Result<()> {
@@ -628,6 +764,22 @@ async fn get_klines(
     }
 }
 
+async fn get_data_health(
+    State(state): State<Arc<AppState>>,
+    Path((market, symbol)): Path<(String, String)>,
+    Query(query): Query<DataHealthQuery>,
+) -> impl IntoResponse {
+    let market = market.to_ascii_uppercase();
+    let symbol = symbol.to_ascii_uppercase();
+    let interval = normalize_interval(query.interval.as_deref().unwrap_or("5m"));
+    let limit = query.limit.unwrap_or(120);
+
+    match build_data_health(&state, &market, &symbol, &interval, limit).await {
+        Ok(value) => Json(value).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
 async fn get_quote(
     State(state): State<Arc<AppState>>,
     Path((market, symbol)): Path<(String, String)>,
@@ -771,6 +923,95 @@ fn interval_minutes(interval: &str) -> Option<i64> {
         "1d" => None,
         _ => None,
     }
+}
+
+fn interval_millis(interval: &str) -> Option<i64> {
+    match normalize_interval(interval).as_str() {
+        "1d" => Some(24 * 60 * 60 * 1000),
+        other => interval_minutes(other).map(|minutes| minutes * 60 * 1000),
+    }
+}
+
+fn expected_latest_closed_ts_millis(interval: &str) -> Option<i64> {
+    let interval_ms = interval_millis(interval)?;
+    let now = Utc::now().timestamp_millis();
+    Some(now - (now % interval_ms) - interval_ms)
+}
+
+fn count_missing_kline_slots(bars: &[Kline], interval: &str) -> usize {
+    let Some(interval_ms) = interval_millis(interval) else {
+        return 0;
+    };
+    let mut timestamps = bars
+        .iter()
+        .filter_map(|bar| parse_ts_millis(&bar.ts))
+        .collect::<Vec<_>>();
+    timestamps.sort_unstable();
+    timestamps.dedup();
+    timestamps
+        .windows(2)
+        .filter_map(|pair| {
+            let diff = pair[1] - pair[0];
+            if diff > interval_ms {
+                Some((diff / interval_ms - 1).max(0) as usize)
+            } else {
+                None
+            }
+        })
+        .sum()
+}
+
+fn latest_kline_ts_millis(bars: &[Kline]) -> Option<i64> {
+    bars.iter().filter_map(|bar| parse_ts_millis(&bar.ts)).max()
+}
+
+async fn build_data_health(
+    state: &AppState,
+    market: &str,
+    symbol: &str,
+    interval: &str,
+    limit: usize,
+) -> Result<Value> {
+    let interval = normalize_interval(interval);
+    let interval_ms =
+        interval_millis(&interval).ok_or_else(|| anyhow!("unsupported interval {}", interval))?;
+    let bars = load_klines_from_db(state, market, symbol, &interval, limit).await?;
+    let source_counts = load_kline_source_counts(state, market, symbol, &interval).await?;
+    let latest_ts_millis = latest_kline_ts_millis(&bars);
+    let expected_latest_ts_millis = expected_latest_closed_ts_millis(&interval);
+    let missing_slots = count_missing_kline_slots(&bars, &interval);
+    let stale = match (latest_ts_millis, expected_latest_ts_millis) {
+        (Some(latest), Some(expected)) => latest + interval_ms < expected,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    let lag_slots = match (latest_ts_millis, expected_latest_ts_millis) {
+        (Some(latest), Some(expected)) if expected > latest => (expected - latest) / interval_ms,
+        (None, Some(_)) => -1,
+        _ => 0,
+    };
+    let status = if bars.is_empty() {
+        "no_data"
+    } else if stale || missing_slots > 0 {
+        "degraded"
+    } else {
+        "healthy"
+    };
+
+    Ok(json!({
+        "ok": true,
+        "market": market,
+        "symbol": symbol,
+        "interval": interval,
+        "status": status,
+        "rows_checked": bars.len(),
+        "latest_ts": latest_ts_millis.and_then(|ts| chrono::DateTime::<Utc>::from_timestamp_millis(ts).map(|d| d.to_rfc3339())),
+        "expected_latest_closed_ts": expected_latest_ts_millis.and_then(|ts| chrono::DateTime::<Utc>::from_timestamp_millis(ts).map(|d| d.to_rfc3339())),
+        "stale": stale,
+        "lag_slots": lag_slots,
+        "missing_slots": missing_slots,
+        "source_counts": source_counts,
+    }))
 }
 
 async fn fetch_klines(
@@ -1746,6 +1987,35 @@ async fn load_klines_from_db(
     Ok(bars)
 }
 
+async fn load_kline_source_counts(
+    state: &AppState,
+    market: &str,
+    symbol: &str,
+    interval: &str,
+) -> Result<Vec<SourceCount>> {
+    let client = postgres_client(&state.db_url).await?;
+    let rows = client
+        .query(
+            r#"
+            SELECT source, COUNT(*)::BIGINT AS rows
+            FROM pa_kline
+            WHERE market = $1 AND symbol = $2 AND interval = $3
+            GROUP BY source
+            ORDER BY source
+            "#,
+            &[&market, &symbol, &interval],
+        )
+        .await?;
+    let mut counts = Vec::with_capacity(rows.len());
+    for row in rows {
+        counts.push(SourceCount {
+            source: row.try_get("source")?,
+            rows: row.try_get("rows")?,
+        });
+    }
+    Ok(counts)
+}
+
 fn postgres_select_klines_sql() -> &'static str {
     r#"
     SELECT ts, open, high, low, close, volume, turnover
@@ -2033,6 +2303,84 @@ mod tests {
         assert_eq!(aggregated[0].ts, "2024-01-01T11:00:00Z");
         assert_relative_eq!(aggregated[1].open, 11.5);
         assert_relative_eq!(aggregated[1].close, 12.5);
+    }
+
+    #[test]
+    fn kline_gap_counter_detects_missing_slots() {
+        let bars = vec![
+            Kline {
+                ts: "2024-01-01T00:00:00Z".to_string(),
+                open: 1.0,
+                high: 1.0,
+                low: 1.0,
+                close: 1.0,
+                volume: 1.0,
+                turnover: 1.0,
+            },
+            Kline {
+                ts: "2024-01-01T00:05:00Z".to_string(),
+                open: 1.0,
+                high: 1.0,
+                low: 1.0,
+                close: 1.0,
+                volume: 1.0,
+                turnover: 1.0,
+            },
+            Kline {
+                ts: "2024-01-01T00:20:00Z".to_string(),
+                open: 1.0,
+                high: 1.0,
+                low: 1.0,
+                close: 1.0,
+                volume: 1.0,
+                turnover: 1.0,
+            },
+        ];
+
+        assert_eq!(count_missing_kline_slots(&bars, "5m"), 2);
+    }
+
+    #[test]
+    fn kline_gap_counter_ignores_duplicates() {
+        let bars = vec![
+            Kline {
+                ts: "2024-01-01T00:00:00Z".to_string(),
+                open: 1.0,
+                high: 1.0,
+                low: 1.0,
+                close: 1.0,
+                volume: 1.0,
+                turnover: 1.0,
+            },
+            Kline {
+                ts: "2024-01-01T00:00:00Z".to_string(),
+                open: 1.0,
+                high: 1.0,
+                low: 1.0,
+                close: 1.0,
+                volume: 1.0,
+                turnover: 1.0,
+            },
+            Kline {
+                ts: "2024-01-01T00:05:00Z".to_string(),
+                open: 1.0,
+                high: 1.0,
+                low: 1.0,
+                close: 1.0,
+                volume: 1.0,
+                turnover: 1.0,
+            },
+        ];
+
+        assert_eq!(count_missing_kline_slots(&bars, "5m"), 0);
+    }
+
+    #[test]
+    fn interval_millis_supports_crypto_periods() {
+        assert_eq!(interval_millis("5m"), Some(300_000));
+        assert_eq!(interval_millis("1h"), Some(3_600_000));
+        assert_eq!(interval_millis("4h"), Some(14_400_000));
+        assert_eq!(interval_millis("1d"), Some(86_400_000));
     }
 
     #[test]
