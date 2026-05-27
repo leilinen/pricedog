@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import time
@@ -13,7 +12,6 @@ from typing import Any
 import httpx
 from sqlalchemy.orm import Session
 
-from src.collectors.kline_collector import KlineCollector
 from src.core.notifier import NotifierManager
 from src.core.providers import ProviderRequest, get_quote_orchestrator
 from src.models.market import MarketCode, MARKETS
@@ -150,9 +148,9 @@ class PriceAlertEngine:
 
     def __init__(self):
         self._quote_cache: dict[str, tuple[float, dict]] = {}
-        self._kline_cache: dict[str, tuple[float, dict]] = {}
+        self._engine_eval_cache: dict[str, tuple[float, dict]] = {}
         self.quote_ttl_sec = 5.0
-        self.kline_ttl_sec = 60.0
+        self.engine_eval_ttl_sec = 60.0
 
     async def _fetch_quotes_map(self, stocks: list[Stock]) -> dict[tuple[str, str], dict]:
         """走 QuoteOrchestrator,支持多 provider 主备故障转移。"""
@@ -185,18 +183,17 @@ class PriceAlertEngine:
                     out[(market.value, sym)] = q
         return out
 
-    async def _get_kline_summary_cached(self, market: MarketCode, symbol: str) -> dict:
-        key = f"{market.value}:{symbol}"
+    async def _evaluate_price_action_cached(
+        self, market: MarketCode, symbol: str, interval: str = "1d"
+    ) -> dict:
+        key = f"{market.value}:{symbol}:{interval}"
         now = time.monotonic()
-        cached = self._kline_cache.get(key)
-        if cached and now - cached[0] < self.kline_ttl_sec:
+        cached = self._engine_eval_cache.get(key)
+        if cached and now - cached[0] < self.engine_eval_ttl_sec:
             return cached[1]
-        try:
-            summary = await asyncio.to_thread(KlineCollector(market).get_kline_summary, symbol)
-        except Exception:
-            summary = {}
-        self._kline_cache[key] = (now, summary or {})
-        return summary or {}
+        result = await _evaluate_price_action(market, symbol, interval)
+        self._engine_eval_cache[key] = (now, result or {})
+        return result or {}
 
     async def _eval_condition(
         self,
@@ -219,11 +216,19 @@ class PriceAlertEngine:
         elif ctype == "volume":
             left = _safe_float(quote.get("volume"))
         elif ctype == "volume_ratio":
-            summary = await self._get_kline_summary_cached(market, symbol)
-            left = _safe_float(summary.get("volume_ratio"))
+            interval = str(_json_get(cond, "interval", "1d") or "1d")
+            ev = await self._evaluate_price_action_cached(market, symbol, interval)
+            if not ev.get("ok", False):
+                return False, {
+                    "type": ctype,
+                    "error": ev.get("error") or "engine_unavailable",
+                    "matched": False,
+                }
+            indicators = ev.get("indicators") or {}
+            left = _safe_float(indicators.get("volume_ratio"))
         elif ctype == "ema20_position":
             interval = str(_json_get(cond, "interval", "1d") or "1d")
-            ev = await _evaluate_price_action(market, symbol, interval)
+            ev = await self._evaluate_price_action_cached(market, symbol, interval)
             if not ev.get("ok", False):
                 return False, {
                     "type": ctype,
@@ -234,7 +239,7 @@ class PriceAlertEngine:
             left = _safe_float(indicators.get("ema20_position"))
         elif ctype == "pattern":
             interval = str(_json_get(cond, "interval", "1d") or "1d")
-            ev = await _evaluate_price_action(market, symbol, interval)
+            ev = await self._evaluate_price_action_cached(market, symbol, interval)
             if not ev.get("ok", False):
                 return False, {
                     "type": ctype,

@@ -30,9 +30,12 @@ def _format_datetime(dt) -> str:
 
 
 class AlertConditionItem(BaseModel):
-    type: str = Field(..., description="price/change_pct/turnover/volume/volume_ratio")
+    type: str = Field(
+        ..., description="price/change_pct/turnover/volume/volume_ratio/ema20_position/pattern"
+    )
     op: str = Field(..., description=">=/<=/>/</==/between")
-    value: float | list[float] = Field(..., description="阈值")
+    value: float | str | list[float] = Field(..., description="阈值")
+    interval: str | None = Field(default=None, description="1d/4h/1h/30m/15m/5m")
 
 
 class AlertConditionGroup(BaseModel):
@@ -74,14 +77,28 @@ def _validate_condition_group(group: AlertConditionGroup):
         raise HTTPException(400, "condition_group.op 仅支持 and/or")
     if not group.items:
         raise HTTPException(400, "condition_group.items 不能为空")
-    allowed_types = {"price", "change_pct", "turnover", "volume", "volume_ratio"}
+    allowed_types = {
+        "price",
+        "change_pct",
+        "turnover",
+        "volume",
+        "volume_ratio",
+        "ema20_position",
+        "pattern",
+    }
     allowed_ops = {">=", "<=", ">", "<", "==", "=", "!=", "<>", "between", "in"}
     for it in group.items:
         if it.type not in allowed_types:
             raise HTTPException(400, f"不支持的条件类型: {it.type}")
         if it.op not in allowed_ops:
             raise HTTPException(400, f"不支持的运算符: {it.op}")
+        if it.type == "pattern" and not isinstance(it.value, str):
+            raise HTTPException(400, "pattern 条件的 value 必须是字符串")
+        if it.type == "pattern" and it.op not in {"==", "="}:
+            raise HTTPException(400, "pattern 条件仅支持 ==/=")
         if it.op in ("between", "in"):
+            if it.type == "pattern":
+                continue
             if not isinstance(it.value, list) or len(it.value) != 2:
                 raise HTTPException(400, f"{it.type} 的 {it.op} 需要两个值")
 
