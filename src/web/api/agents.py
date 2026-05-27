@@ -58,7 +58,7 @@ def _set_scan_cache(key: str, payload: dict) -> None:
 def _format_datetime(dt, tz: str | None = None) -> str:
     """格式化时间为当前时区的 ISO 格式。
 
-    说明：SQLite 存储的时间通常没有 tzinfo，按 UTC 解释后再转换到 app_timezone。
+    说明：无时区时间按 UTC 解释后再转换到 app_timezone。
     """
 
     if not dt:

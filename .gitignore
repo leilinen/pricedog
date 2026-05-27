@@ -14,12 +14,20 @@ dist/
 build/
 static/
 data/
+.pytest_cache/
 
 # Frontend
 node_modules/
 frontend/dist/
 frontend/.vite/
 pnpm-debug.log*
+
+# Rust
+target/
+price-action-engine/target/
+
+# Local planning / knowledge notes
+docs/PRICEDOG_PLAN.md
 
 # Claude
 .claude/

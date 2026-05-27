@@ -158,7 +158,6 @@ app.include_router(
     dependencies=protected,
 )
 
-
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}

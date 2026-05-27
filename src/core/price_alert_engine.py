@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from sqlalchemy.orm import Session
 
 from src.collectors.kline_collector import KlineCollector
@@ -94,6 +96,48 @@ def _op_eval(left: float | None, op: str, right: Any) -> bool:
     return False
 
 
+def _engine_url() -> str:
+    return (os.environ.get("PRICE_ACTION_ENGINE_URL") or "http://127.0.0.1:8001").rstrip("/")
+
+
+async def _fetch_price_action_quote(market: MarketCode, symbol: str) -> dict | None:
+    url = f"{_engine_url()}/api/v1/quote/{market.value}/{symbol}"
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            payload = resp.json()
+        if isinstance(payload, dict) and payload.get("ok") is False:
+            return None
+        quote = payload.get("quote") if isinstance(payload, dict) else None
+        if isinstance(quote, dict):
+            return quote
+    except Exception as e:
+        logger.debug(f"Price Action Engine quote unavailable {market.value}:{symbol}: {e}")
+    return None
+
+
+async def _evaluate_price_action(market: MarketCode, symbol: str, interval: str = "1d") -> dict:
+    url = f"{_engine_url()}/api/v1/evaluate"
+    payload = {
+        "market": market.value,
+        "symbol": symbol,
+        "interval": interval,
+        "klines": [],
+        "persist_signal": False,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        if isinstance(data, dict):
+            return data
+    except Exception as e:
+        logger.debug(f"Price Action Engine evaluate unavailable {market.value}:{symbol}: {e}")
+    return {"ok": False, "error": "engine_unavailable"}
+
+
 @dataclass
 class RuleEvalResult:
     matched: bool
@@ -121,6 +165,12 @@ class PriceAlertEngine:
         for market, items in grouped.items():
             symbols = [s.symbol for s in items]
             if not symbols:
+                continue
+            if market == MarketCode.CRYPTO:
+                for sym in symbols:
+                    q = await _fetch_price_action_quote(market, sym)
+                    if q:
+                        out[(market.value, sym)] = q
                 continue
             resp = await orch.fetch(
                 ProviderRequest(symbols=tuple(symbols), market=market.value)
@@ -171,6 +221,44 @@ class PriceAlertEngine:
         elif ctype == "volume_ratio":
             summary = await self._get_kline_summary_cached(market, symbol)
             left = _safe_float(summary.get("volume_ratio"))
+        elif ctype == "ema20_position":
+            interval = str(_json_get(cond, "interval", "1d") or "1d")
+            ev = await _evaluate_price_action(market, symbol, interval)
+            if not ev.get("ok", False):
+                return False, {
+                    "type": ctype,
+                    "error": ev.get("error") or "engine_unavailable",
+                    "matched": False,
+                }
+            indicators = ev.get("indicators") or {}
+            left = _safe_float(indicators.get("ema20_position"))
+        elif ctype == "pattern":
+            interval = str(_json_get(cond, "interval", "1d") or "1d")
+            ev = await _evaluate_price_action(market, symbol, interval)
+            if not ev.get("ok", False):
+                return False, {
+                    "type": ctype,
+                    "error": ev.get("error") or "engine_unavailable",
+                    "matched": False,
+                }
+            target = str(value or "").strip()
+            signals = ev.get("signals") or []
+            matched_signal = None
+            for sig in signals:
+                if not isinstance(sig, dict):
+                    continue
+                if not target or str(sig.get("signal_type") or "") == target:
+                    matched_signal = sig
+                    break
+            ok = matched_signal is not None
+            return ok, {
+                "type": ctype,
+                "op": op or "==",
+                "target": target,
+                "actual": matched_signal.get("signal_type") if matched_signal else None,
+                "matched": ok,
+                "signal": matched_signal,
+            }
         else:
             return False, {"type": ctype, "error": "unsupported_type"}
 

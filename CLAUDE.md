@@ -37,7 +37,7 @@ bash scripts/install-hooks.sh                # Install pre-push hook (runs tests
 
 - **`server.py`** — Entrypoint. Initializes DB, registers agents/data sources, starts schedulers (APScheduler), mounts FastAPI app.
 - **`src/config.py`** — `Settings` (pydantic-settings, from `.env`), `AppConfig`, `StockConfig` (from YAML).
-- **`src/web/`** — FastAPI app with JWT auth (`HTTPBearer`). API routes in `src/web/api/`. Models in `src/web/models.py`. SQLite DB via SQLAlchemy (`src/web/database.py`).
+- **`src/web/`** — FastAPI app with JWT auth (`HTTPBearer`). API routes in `src/web/api/`. Models in `src/web/models.py`. PostgreSQL via SQLAlchemy (`src/web/database.py`).
 - **`src/agents/`** — Business logic agents (premarket_outlook, daily_report, intraday_monitor, news_digest, chart_analyst). Each registered in `server.py` `AGENT_REGISTRY`.
 - **`src/collectors/`** — Stateless data collectors (quotes, kline, news). Use `efinance`/`akshare` for CN market data.
 - **`src/core/`** — Core utilities:

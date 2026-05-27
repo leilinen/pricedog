@@ -22,7 +22,7 @@ class AIService(Base):
 
     __tablename__ = "ai_services"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)  # "OpenAI", "智谱", "DeepSeek"
     base_url = Column(String, nullable=False)
     api_key = Column(String, default="")
@@ -38,7 +38,7 @@ class AIModel(Base):
 
     __tablename__ = "ai_models"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)  # 显示名，如 "GLM-4-Flash"
     service_id = Column(
         Integer, ForeignKey("ai_services.id", ondelete="CASCADE"), nullable=False
@@ -53,7 +53,7 @@ class AIModel(Base):
 class NotifyChannel(Base):
     __tablename__ = "notify_channels"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
     type = Column(String, nullable=False)  # "telegram"
     config = Column(JSON, default={})  # {"bot_token": "...", "chat_id": "..."}
@@ -67,7 +67,7 @@ class Account(Base):
 
     __tablename__ = "accounts"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)  # 账户名称，如 "招商证券"、"华泰证券"
     available_funds = Column(Float, default=0)  # 可用资金
     enabled = Column(Boolean, default=True)
@@ -82,7 +82,7 @@ class Account(Base):
 class Stock(Base):
     __tablename__ = "stocks"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     symbol = Column(String, nullable=False)
     name = Column(String, nullable=False)
     market = Column(String, nullable=False)  # CN / HK / US
@@ -110,7 +110,7 @@ class Position(Base):
         UniqueConstraint("account_id", "stock_id", name="uq_account_stock"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     account_id = Column(
         Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
     )
@@ -139,7 +139,7 @@ class StockAgent(Base):
         UniqueConstraint("stock_id", "agent_name", name="uq_stock_agent"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     stock_id = Column(
         Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False
     )
@@ -157,7 +157,7 @@ class StockAgent(Base):
 class AgentConfig(Base):
     __tablename__ = "agent_configs"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     name = Column(String, unique=True, nullable=False)
     display_name = Column(String, nullable=False)
     description = Column(String, default="")
@@ -182,7 +182,7 @@ class AgentConfig(Base):
 class AgentRun(Base):
     __tablename__ = "agent_runs"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     agent_name = Column(String, nullable=False)
     status = Column(String, nullable=False)  # success / failed
     trace_id = Column(String, default="")
@@ -205,7 +205,7 @@ class LogEntry(Base):
         Index("ix_log_entries_agent_event", "agent_name", "event"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     timestamp = Column(DateTime, nullable=False)
     level = Column(String, nullable=False)
     logger_name = Column(String, default="")
@@ -223,7 +223,7 @@ class LogEntry(Base):
 class AppSettings(Base):
     __tablename__ = "app_settings"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     key = Column(String, unique=True, nullable=False)
     value = Column(String, default="")
     description = Column(String, default="")
@@ -234,7 +234,7 @@ class DataSource(Base):
 
     __tablename__ = "data_sources"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)  # "雪球资讯"
     type = Column(
         String, nullable=False
@@ -256,7 +256,7 @@ class NewsCache(Base):
         UniqueConstraint("source", "external_id", name="uq_news_source_external"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     source = Column(String, nullable=False)  # "cls" / "eastmoney"
     external_id = Column(String, nullable=False)  # 来源侧 ID
     title = Column(String, nullable=False)
@@ -275,7 +275,7 @@ class NotifyThrottle(Base):
         UniqueConstraint("agent_name", "stock_symbol", name="uq_agent_stock_throttle"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     agent_name = Column(String, nullable=False)
     stock_symbol = Column(String, nullable=False)
     last_notify_at = Column(DateTime, nullable=False)
@@ -292,7 +292,7 @@ class AnalysisHistory(Base):
         ),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     agent_name = Column(String, nullable=False)  # "daily_report" / "premarket_outlook"
     stock_symbol = Column(String, nullable=False)  # 股票代码，"*" 表示全部
     analysis_date = Column(String, nullable=False)  # 分析日期 "YYYY-MM-DD"
@@ -324,7 +324,7 @@ class StockContextSnapshot(Base):
         ),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     symbol = Column(String, nullable=False)
     market = Column(String, nullable=False)  # CN/HK/US
     snapshot_date = Column(String, nullable=False)  # YYYY-MM-DD
@@ -347,7 +347,7 @@ class NewsTopicSnapshot(Base):
         Index("ix_news_topic_snapshot_date", "snapshot_date"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     snapshot_date = Column(String, nullable=False)  # YYYY-MM-DD
     window_days = Column(Integer, nullable=False, default=7)
     symbols = Column(JSON, default=[])
@@ -367,7 +367,7 @@ class AgentContextRun(Base):
         Index("ix_agent_context_stock_date", "stock_symbol", "analysis_date"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     agent_name = Column(String, nullable=False)
     stock_symbol = Column(String, nullable=False, default="*")
     analysis_date = Column(String, nullable=False)  # YYYY-MM-DD
@@ -390,7 +390,7 @@ class AgentPredictionOutcome(Base):
         Index("ix_prediction_status_horizon", "outcome_status", "horizon_days"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     agent_name = Column(String, nullable=False)
     stock_symbol = Column(String, nullable=False)
     stock_market = Column(String, nullable=False, default="CN")
@@ -413,7 +413,7 @@ class StockSuggestion(Base):
 
     __tablename__ = "stock_suggestions"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     stock_symbol = Column(String, nullable=False, index=True)
     stock_market = Column(String, nullable=False, default="CN", index=True)
     stock_name = Column(String, default="")
@@ -472,7 +472,7 @@ class EntryCandidate(Base):
         Index("ix_entry_candidate_status_updated", "status", "updated_at"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     stock_symbol = Column(String, nullable=False)
     stock_market = Column(String, nullable=False, default="CN")
     stock_name = Column(String, default="")
@@ -518,7 +518,7 @@ class MarketScanSnapshot(Base):
         Index("ix_market_scan_snapshot_source", "snapshot_date", "source"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     snapshot_date = Column(String, nullable=False)  # YYYY-MM-DD
     stock_symbol = Column(String, nullable=False)
     stock_market = Column(String, nullable=False, default="CN")
@@ -541,7 +541,7 @@ class EntryCandidateFeedback(Base):
         Index("ix_entry_feedback_source", "candidate_source"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     snapshot_date = Column(String, nullable=False, default="")  # YYYY-MM-DD
     stock_symbol = Column(String, nullable=False)
     stock_market = Column(String, nullable=False, default="CN")
@@ -566,7 +566,7 @@ class EntryCandidateOutcome(Base):
         Index("ix_entry_outcome_symbol_day", "stock_market", "stock_symbol", "snapshot_date"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     candidate_id = Column(Integer, ForeignKey("entry_candidates.id", ondelete="CASCADE"), nullable=False)
     snapshot_date = Column(String, nullable=False, default="")
     stock_symbol = Column(String, nullable=False)
@@ -595,7 +595,7 @@ class StrategyCatalog(Base):
         Index("ix_strategy_catalog_enabled", "enabled"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     code = Column(String, nullable=False)
     name = Column(String, nullable=False)
     description = Column(String, default="")
@@ -627,7 +627,7 @@ class StrategySignalRun(Base):
         Index("ix_strategy_signal_status", "status", "updated_at"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     snapshot_date = Column(String, nullable=False)  # YYYY-MM-DD
     stock_symbol = Column(String, nullable=False)
     stock_market = Column(String, nullable=False, default="CN")
@@ -683,7 +683,7 @@ class StrategyOutcome(Base):
         Index("ix_strategy_outcome_status", "outcome_status", "evaluated_at"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     signal_run_id = Column(
         Integer, ForeignKey("strategy_signal_runs.id", ondelete="CASCADE"), nullable=False
     )
@@ -719,7 +719,7 @@ class StrategyWeight(Base):
         Index("ix_strategy_weight_effective", "effective_from"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     strategy_code = Column(String, nullable=False)
     market = Column(String, nullable=False, default="ALL")
     regime = Column(String, nullable=False, default="default")
@@ -740,7 +740,7 @@ class StrategyWeightHistory(Base):
         Index("ix_strategy_weight_history_strategy_market", "strategy_code", "market"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     strategy_code = Column(String, nullable=False)
     market = Column(String, nullable=False, default="ALL")
     regime = Column(String, nullable=False, default="default")
@@ -767,7 +767,7 @@ class MarketRegimeSnapshot(Base):
         Index("ix_market_regime_type", "regime"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     snapshot_date = Column(String, nullable=False)  # YYYY-MM-DD
     market = Column(String, nullable=False, default="CN")  # CN/HK/US
     regime = Column(String, nullable=False, default="neutral")  # bullish/neutral/bearish
@@ -793,7 +793,7 @@ class StrategyFactorSnapshot(Base):
         Index("ix_strategy_factor_strategy_market", "strategy_code", "stock_market"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     signal_run_id = Column(
         Integer, ForeignKey("strategy_signal_runs.id", ondelete="CASCADE"), nullable=False
     )
@@ -827,7 +827,7 @@ class PortfolioRiskSnapshot(Base):
         Index("ix_portfolio_risk_snapshot", "snapshot_date", "market"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     snapshot_date = Column(String, nullable=False)  # YYYY-MM-DD
     market = Column(String, nullable=False, default="CN")
     total_signals = Column(Integer, default=0)
@@ -848,7 +848,7 @@ class SuggestionFeedback(Base):
 
     __tablename__ = "suggestion_feedback"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     suggestion_id = Column(
         Integer,
         ForeignKey("stock_suggestions.id", ondelete="CASCADE"),
@@ -868,7 +868,7 @@ class PriceAlertRule(Base):
         Index("ix_price_alert_stock_enabled", "stock_id", "enabled"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     stock_id = Column(
         Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False
     )
@@ -904,7 +904,7 @@ class PriceAlertHit(Base):
         ),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     rule_id = Column(
         Integer, ForeignKey("price_alert_rules.id", ondelete="CASCADE"), nullable=False
     )
@@ -927,7 +927,7 @@ class PaperTradingAccount(Base):
 
     __tablename__ = "paper_trading_account"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     initial_capital = Column(Float, nullable=False, default=1000000.0)
     current_capital = Column(Float, nullable=False, default=1000000.0)
     total_pnl = Column(Float, nullable=False, default=0.0)
@@ -950,7 +950,7 @@ class PaperTradingPosition(Base):
         Index("ix_paper_pos_symbol_market", "stock_symbol", "stock_market"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     stock_symbol = Column(String, nullable=False)
     stock_market = Column(String, nullable=False, default="CN")
     stock_name = Column(String, default="")
@@ -979,7 +979,7 @@ class PaperTradingTrade(Base):
         Index("ix_paper_trade_symbol", "stock_symbol", "stock_market"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     stock_symbol = Column(String, nullable=False)
     stock_market = Column(String, nullable=False, default="CN")
     stock_name = Column(String, default="")
@@ -1007,7 +1007,7 @@ class ChatConversation(Base):
         Index("ix_chat_conv_stock", "stock_symbol", "stock_market"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     title = Column(String, default="")
     stock_symbol = Column(String, nullable=True)
     stock_market = Column(String, nullable=True)
@@ -1025,7 +1025,7 @@ class ChatMessage(Base):
         Index("ix_chat_msg_conv", "conversation_id", "created_at"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     conversation_id = Column(Integer, nullable=False)
     role = Column(String, nullable=False, default="user")  # user/assistant/system
     content = Column(Text, nullable=False, default="")

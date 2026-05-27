@@ -8,6 +8,7 @@ class MarketCode(str, Enum):
     CN = "CN"  # A股
     HK = "HK"  # 港股
     US = "US"  # 美股
+    CRYPTO = "CRYPTO"  # 加密货币
 
 
 @dataclass
@@ -31,6 +32,9 @@ class MarketDef:
 
     def is_trading_time(self, dt: datetime | None = None) -> bool:
         """判断给定时间是否在交易时段内"""
+        if self.code == MarketCode.CRYPTO:
+            return True
+
         if dt is None:
             dt = datetime.now(self.get_tz())
         else:
@@ -77,6 +81,15 @@ MARKETS: dict[MarketCode, MarketDef] = {
             TradingSession(time(9, 30), time(16, 0)),
         ],
         symbol_pattern=r"^[A-Z]{1,5}$",
+    ),
+    MarketCode.CRYPTO: MarketDef(
+        code=MarketCode.CRYPTO,
+        name="加密货币",
+        timezone="UTC",
+        sessions=[
+            TradingSession(time(0, 0), time(23, 59)),
+        ],
+        symbol_pattern=r"^[A-Z0-9]{3,20}$",
     ),
 }
 

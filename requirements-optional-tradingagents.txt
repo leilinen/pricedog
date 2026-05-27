@@ -1,0 +1,3 @@
+# 深度分析 — TradingAgents (多 Agent 投资决策框架)。
+# 只在需要 TradingAgents 深度分析时安装；会拉 langchain/langgraph/yfinance 等重依赖。
+tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git@main

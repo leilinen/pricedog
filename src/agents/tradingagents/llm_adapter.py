@@ -83,7 +83,7 @@ def build_ta_llm_config(
         "selected_analysts": analysts,
         "output_language": output_language,
         "online_tools": True,
-        "checkpoint_enabled": False,  # 避免 sqlite checkpoint 文件污染
+        "checkpoint_enabled": False,
     })
     return config
 

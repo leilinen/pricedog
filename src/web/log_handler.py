@@ -1,4 +1,4 @@
-"""Custom logging handler that writes log entries to SQLite."""
+"""Custom logging handler that writes log entries to the application database."""
 
 import logging
 import threading

@@ -276,7 +276,7 @@ def delete_stock(stock_id: int, db: Session = Depends(get_db)):
     if has_position:
         raise HTTPException(400, "该股票存在持仓，请先删除持仓后再删除股票")
 
-    # SQLite 默认可能不启用 FK 级联，手动清理提醒数据避免孤儿记录。
+    # 手动清理提醒数据，避免孤儿记录。
     rule_ids = [
         row[0]
         for row in db.query(PriceAlertRule.id).filter(
