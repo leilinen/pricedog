@@ -1729,6 +1729,7 @@ fn detect_breakout(klines: &[Kline], indicators: &Indicators) -> Vec<Signal> {
         0.0
     };
     let ema_score = ema20_entry_score(curr, indicators, direction);
+    let ema20_touched = ema20_touch_reclaim(curr, indicators, direction);
     let mut score = 0.0;
     if body_ratio >= 2.0 {
         score += 15.0;
@@ -1774,8 +1775,8 @@ fn detect_breakout(klines: &[Kline], indicators: &Indicators) -> Vec<Signal> {
         stop_loss: stop,
         target_price: target,
         reason: format!(
-            "{} breakout: body_ratio={:.2}, distance_atr={:.2}",
-            direction, body_ratio, distance_atr
+            "{} breakout: body_ratio={:.2}, distance_atr={:.2}, ema20_touched={}",
+            direction, body_ratio, distance_atr, ema20_touched
         ),
         evidence: json!({
             "range_high": range_high,
@@ -1785,20 +1786,35 @@ fn detect_breakout(klines: &[Kline], indicators: &Indicators) -> Vec<Signal> {
             "distance_atr": distance_atr,
             "volume_ratio": indicators.volume_ratio,
             "ema20_position": indicators.ema20_position,
+            "ema20_touched": ema20_touched,
         }),
     }]
+}
+
+fn ema20_touch_reclaim(curr: &Kline, indicators: &Indicators, direction: &str) -> bool {
+    let Some(ema20) = indicators.ema20 else {
+        return false;
+    };
+    if direction == "long" {
+        curr.low <= ema20 && curr.close >= ema20
+    } else {
+        curr.high >= ema20 && curr.close <= ema20
+    }
 }
 
 fn ema20_entry_score(curr: &Kline, indicators: &Indicators, direction: &str) -> f64 {
     let Some(ema20) = indicators.ema20 else {
         return 0.0;
     };
-    let mut score = 0.0;
+    let mut score: f64 = 0.0;
     if direction == "long" && curr.close > ema20 {
         score += 4.0;
     }
     if direction == "short" && curr.close < ema20 {
         score += 4.0;
+    }
+    if ema20_touch_reclaim(curr, indicators, direction) {
+        score += 6.0;
     }
     if let Some(pos) = indicators.ema20_position {
         if direction == "long" && pos > 0.0 {
@@ -1810,8 +1826,11 @@ fn ema20_entry_score(curr: &Kline, indicators: &Indicators, direction: &str) -> 
         if pos.abs() <= 1.5 {
             score += 2.0;
         }
+        if pos.abs() >= 2.5 {
+            score -= 3.0;
+        }
     }
-    score
+    score.max(0.0)
 }
 
 fn median(mut values: Vec<f64>) -> f64 {
@@ -2241,6 +2260,82 @@ mod tests {
         let signals = detect_breakout(&bars, &indicators);
 
         assert!(signals.is_empty());
+    }
+
+    #[test]
+    fn ema20_touch_reclaim_boosts_entry_score() {
+        let bars = (0..30)
+            .map(|i| Kline {
+                ts: format!("2024-01-{:02}", i + 1),
+                open: 100.0 + i as f64,
+                high: 102.0 + i as f64,
+                low: 99.0 + i as f64,
+                close: 101.0 + i as f64,
+                volume: 1000.0,
+                turnover: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let indicators = compute_indicators(&bars);
+        let ema20 = indicators.ema20.unwrap();
+
+        let touch_bar = Kline {
+            ts: "2024-02-01".to_string(),
+            open: ema20 - 0.5,
+            high: ema20 + 2.0,
+            low: ema20 - 1.0,
+            close: ema20 + 1.5,
+            volume: 1000.0,
+            turnover: 0.0,
+        };
+        let no_touch_bar = Kline {
+            ts: "2024-02-02".to_string(),
+            open: ema20 + 0.5,
+            high: ema20 + 2.0,
+            low: ema20 + 0.2,
+            close: ema20 + 1.5,
+            volume: 1000.0,
+            turnover: 0.0,
+        };
+
+        let touch_score = ema20_entry_score(&touch_bar, &indicators, "long");
+        let no_touch_score = ema20_entry_score(&no_touch_bar, &indicators, "long");
+
+        assert!(touch_score > no_touch_score);
+        assert!(ema20_touch_reclaim(&touch_bar, &indicators, "long"));
+        assert!(!ema20_touch_reclaim(&no_touch_bar, &indicators, "long"));
+    }
+
+    #[test]
+    fn overextended_position_reduces_ema20_entry_score() {
+        let moderate = Indicators {
+            ema20: Some(100.0),
+            atr14: Some(10.0),
+            ema20_position: Some(1.0),
+            volume_ratio: None,
+            amplitude: None,
+        };
+        let stretched = Indicators {
+            ema20: Some(100.0),
+            atr14: Some(10.0),
+            ema20_position: Some(3.0),
+            volume_ratio: None,
+            amplitude: None,
+        };
+        let bar = Kline {
+            ts: "2024-02-01".to_string(),
+            open: 101.0,
+            high: 104.0,
+            low: 100.5,
+            close: 103.0,
+            volume: 1000.0,
+            turnover: 0.0,
+        };
+
+        assert!(ema20_entry_score(&bar, &moderate, "long") > 0.0);
+        assert!(
+            ema20_entry_score(&bar, &moderate, "long")
+                > ema20_entry_score(&bar, &stretched, "long")
+        );
     }
 
     #[test]
