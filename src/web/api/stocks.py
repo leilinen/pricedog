@@ -1,7 +1,10 @@
 import asyncio
 import logging
+import os
 import threading
 from types import SimpleNamespace
+
+import requests as http_requests
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
@@ -195,10 +198,31 @@ def get_quotes(db: Session = Depends(get_db)):
         market_stocks.setdefault(s.market, []).append(s)
 
     quotes = {}
+    engine_url = (os.environ.get("PRICE_ACTION_ENGINE_URL") or "http://127.0.0.1:8001").rstrip("/")
+
     for market, stock_list in market_stocks.items():
         try:
             market_code = MarketCode(market)
         except ValueError:
+            continue
+
+        if market_code == MarketCode.CRYPTO:
+            # Crypto 行情从 Rust 引擎获取
+            for s in stock_list:
+                try:
+                    resp = http_requests.get(f"{engine_url}/api/v1/quote/{market}/{s.symbol}", timeout=5)
+                    if resp.status_code == 200:
+                        body = resp.json()
+                        data = body.get("quote") or body.get("data") or {}
+                        if data and data.get("current_price"):
+                            quotes[s.symbol] = {
+                                "current_price": data.get("current_price"),
+                                "change_pct": data.get("change_pct"),
+                                "change_amount": data.get("change_amount"),
+                                "prev_close": data.get("prev_close"),
+                            }
+                except Exception as e:
+                    logger.error(f"获取 {s.symbol} crypto 行情失败: {e}")
             continue
 
         symbols = [_tencent_symbol(s.symbol, market_code) for s in stock_list]

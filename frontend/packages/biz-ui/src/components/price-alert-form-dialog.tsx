@@ -6,13 +6,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Button } from '@panwatch/base-ui/components/ui/button'
 
 export type RuleOp = 'and' | 'or'
-export type ConditionType = 'price' | 'change_pct' | 'turnover' | 'volume' | 'volume_ratio'
+export type ConditionType = 'price' | 'change_pct' | 'turnover' | 'volume' | 'volume_ratio' | 'signal_bar'
 export type ConditionOp = '>=' | '<=' | '>' | '<' | '==' | 'between'
 
 export interface AlertConditionItem {
   type: ConditionType
   op: ConditionOp
-  value: number | [number, number]
+  value: number | [number, number] | string
+  interval?: string
 }
 
 export interface PriceAlertFormState {
@@ -64,7 +65,22 @@ const TYPE_LABEL: Record<ConditionType, string> = {
   turnover: '成交额',
   volume: '成交量',
   volume_ratio: '量比',
+  signal_bar: '信号K线',
 }
+
+const SIGNAL_BAR_OPTIONS = [
+  { value: 'any', label: '任意信号K' },
+  { value: 'pa_signal_bar', label: '常规信号K' },
+  { value: 'pa_pattern', label: '特殊形态' },
+]
+
+const INTERVAL_OPTIONS = [
+  { value: '5m', label: '5分钟' },
+  { value: '15m', label: '15分钟' },
+  { value: '1h', label: '1小时' },
+  { value: '4h', label: '4小时' },
+  { value: '1d', label: '日线' },
+]
 
 const buildDefaultForm = (stockId = 0): PriceAlertFormState => ({
   stock_id: stockId,
@@ -132,10 +148,18 @@ export default function PriceAlertFormDialog(props: {
   const submit = async () => {
     if (!form.stock_id) return
     if (!form.items.length) return
+    // 将 signal_bar 类型转换为后端 pattern 类型
+    const mappedItems = form.items.map(it => {
+      if (it.type === 'signal_bar') {
+        const backendValue = it.value === 'any' ? '' : String(it.value || '')
+        return { ...it, type: 'pattern' as ConditionType, op: '==' as ConditionOp, value: backendValue, interval: it.interval || '1h' }
+      }
+      return it
+    })
     await props.onSubmit({
       stock_id: form.stock_id,
       name: form.name.trim(),
-      condition_group: { op: form.op, items: form.items },
+      condition_group: { op: form.op, items: mappedItems },
       market_hours_mode: form.market_hours_mode,
       cooldown_minutes: Number(form.cooldown_minutes || 0),
       max_triggers_per_day: Number(form.max_triggers_per_day || 0),
@@ -401,7 +425,18 @@ export default function PriceAlertFormDialog(props: {
             {form.items.map((it, idx) => (
               <div key={idx} className="grid grid-cols-12 gap-2">
                 <div className="col-span-4">
-                  <Select value={it.type} onValueChange={(v) => updateCond(idx, { type: v as ConditionType })}>
+                  <Select value={it.type} onValueChange={(v) => {
+                    const patch: Partial<AlertConditionItem> = { type: v as ConditionType }
+                    if (v === 'signal_bar') {
+                      patch.op = '=='
+                      patch.value = 'any'
+                      patch.interval = '1h'
+                    } else if (typeof it.value === 'string') {
+                      patch.op = '>='
+                      patch.value = 0
+                    }
+                    updateCond(idx, patch)
+                  }}>
                     <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       {Object.entries(TYPE_LABEL).map(([k, label]) => (
@@ -410,52 +445,79 @@ export default function PriceAlertFormDialog(props: {
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="col-span-3">
-                  <Select value={it.op} onValueChange={(v) => updateCond(idx, { op: v as ConditionOp })}>
-                    <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value=">=">{'>='}</SelectItem>
-                      <SelectItem value="<=">{'<='}</SelectItem>
-                      <SelectItem value=">">{'>'}</SelectItem>
-                      <SelectItem value="<">{'<'}</SelectItem>
-                      <SelectItem value="==">{'=='}</SelectItem>
-                      <SelectItem value="between">between</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="col-span-4">
-                  {it.op === 'between' ? (
-                    <div className="grid grid-cols-2 gap-1">
-                      <Input
-                        className="h-8"
-                        type="number"
-                        value={Array.isArray(it.value) ? String(it.value[0]) : '0'}
-                        onChange={(e) => {
-                          const arr: [number, number] = Array.isArray(it.value) ? [Number(it.value[0] || 0), Number(it.value[1] || 0)] : [0, 0]
-                          arr[0] = Number(e.target.value || 0)
-                          updateCond(idx, { value: arr })
-                        }}
-                      />
-                      <Input
-                        className="h-8"
-                        type="number"
-                        value={Array.isArray(it.value) ? String(it.value[1]) : '0'}
-                        onChange={(e) => {
-                          const arr: [number, number] = Array.isArray(it.value) ? [Number(it.value[0] || 0), Number(it.value[1] || 0)] : [0, 0]
-                          arr[1] = Number(e.target.value || 0)
-                          updateCond(idx, { value: arr })
-                        }}
-                      />
+                {it.type === 'signal_bar' ? (
+                  <>
+                    <div className="col-span-3">
+                      <Select value={String(it.value || '')} onValueChange={(v) => updateCond(idx, { value: v })}>
+                        <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {SIGNAL_BAR_OPTIONS.map(opt => (
+                            <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
-                  ) : (
-                    <Input
-                      className="h-8"
-                      type="number"
-                      value={Array.isArray(it.value) ? String(it.value[0]) : String(it.value)}
-                      onChange={(e) => updateCond(idx, { value: Number(e.target.value || 0) })}
-                    />
-                  )}
-                </div>
+                    <div className="col-span-4">
+                      <Select value={it.interval || '1h'} onValueChange={(v) => updateCond(idx, { interval: v })}>
+                        <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {INTERVAL_OPTIONS.map(opt => (
+                            <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="col-span-3">
+                      <Select value={it.op} onValueChange={(v) => updateCond(idx, { op: v as ConditionOp })}>
+                        <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value=">=">{'>='}</SelectItem>
+                          <SelectItem value="<=">{'<='}</SelectItem>
+                          <SelectItem value=">">{'>'}</SelectItem>
+                          <SelectItem value="<">{'<'}</SelectItem>
+                          <SelectItem value="==">{'=='}</SelectItem>
+                          <SelectItem value="between">between</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="col-span-4">
+                      {it.op === 'between' ? (
+                        <div className="grid grid-cols-2 gap-1">
+                          <Input
+                            className="h-8"
+                            type="number"
+                            value={Array.isArray(it.value) ? String(it.value[0]) : '0'}
+                            onChange={(e) => {
+                              const arr: [number, number] = Array.isArray(it.value) ? [Number(it.value[0] || 0), Number(it.value[1] || 0)] : [0, 0]
+                              arr[0] = Number(e.target.value || 0)
+                              updateCond(idx, { value: arr })
+                            }}
+                          />
+                          <Input
+                            className="h-8"
+                            type="number"
+                            value={Array.isArray(it.value) ? String(it.value[1]) : '0'}
+                            onChange={(e) => {
+                              const arr: [number, number] = Array.isArray(it.value) ? [Number(it.value[0] || 0), Number(it.value[1] || 0)] : [0, 0]
+                              arr[1] = Number(e.target.value || 0)
+                              updateCond(idx, { value: arr })
+                            }}
+                          />
+                        </div>
+                      ) : (
+                        <Input
+                          className="h-8"
+                          type="number"
+                          value={Array.isArray(it.value) ? String(it.value[0]) : String(it.value)}
+                          onChange={(e) => updateCond(idx, { value: Number(e.target.value || 0) })}
+                        />
+                      )}
+                    </div>
+                  </>
+                )}
                 <div className="col-span-1">
                   <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => removeCond(idx)}>×</Button>
                 </div>

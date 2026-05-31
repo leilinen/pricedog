@@ -67,13 +67,21 @@ function fmt(iso?: string | null): string {
   return d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
-function conditionText(item: AlertConditionItem): string {
+function conditionText(item: { type: string; op: string; value: number | [number, number] | string; interval?: string }): string {
   const TYPE_LABEL: Record<string, string> = {
     price: '价格',
     change_pct: '涨跌幅%',
     turnover: '成交额',
     volume: '成交量',
     volume_ratio: '量比',
+    signal_bar: '信号K线',
+    pattern: '信号K线',
+  }
+  if (item.type === 'pattern' || item.type === 'signal_bar') {
+    const SIGNAL_LABEL: Record<string, string> = { '': '任意信号K', any: '任意信号K', pa_signal_bar: '常规信号K', pa_pattern: '特殊形态' }
+    const sigLabel = SIGNAL_LABEL[String(item.value)] || String(item.value)
+    const iv = item.interval ? ` (${item.interval})` : ''
+    return `${TYPE_LABEL[item.type]}${iv} ${sigLabel}`
   }
   if (item.op === 'between' && Array.isArray(item.value)) {
     return `${TYPE_LABEL[item.type] || item.type} ∈ [${item.value[0]}, ${item.value[1]}]`

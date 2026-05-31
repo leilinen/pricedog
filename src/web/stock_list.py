@@ -59,6 +59,20 @@ EASTMONEY_BJ_PARAMS = {
 }
 PAGE_SIZE = 100
 
+# 常见加密货币标的（OKX WebSocket 支持的现货交易对）
+CRYPTO_LIST = [
+    {"symbol": "BTCUSDT", "name": "BTC/USDT", "market": "CRYPTO"},
+    {"symbol": "ETHUSDT", "name": "ETH/USDT", "market": "CRYPTO"},
+    {"symbol": "SOLUSDT", "name": "SOL/USDT", "market": "CRYPTO"},
+    {"symbol": "BNBUSDT", "name": "BNB/USDT", "market": "CRYPTO"},
+    {"symbol": "XRPUSDT", "name": "XRP/USDT", "market": "CRYPTO"},
+    {"symbol": "ADAUSDT", "name": "ADA/USDT", "market": "CRYPTO"},
+    {"symbol": "DOGEUSDT", "name": "DOGE/USDT", "market": "CRYPTO"},
+    {"symbol": "DOTUSDT", "name": "DOT/USDT", "market": "CRYPTO"},
+    {"symbol": "AVAXUSDT", "name": "AVAX/USDT", "market": "CRYPTO"},
+    {"symbol": "MATICUSDT", "name": "MATIC/USDT", "market": "CRYPTO"},
+]
+
 
 def _load_cache() -> list[dict] | None:
     if not os.path.exists(CACHE_FILE):
@@ -299,6 +313,9 @@ def refresh_stock_list() -> list[dict]:
     except Exception as e:
         logger.warning(f"东方财富获取北交所失败: {e}")
 
+    # 加密货币（内置列表）
+    stocks.extend(CRYPTO_LIST)
+
     if stocks:
         _save_cache(stocks)
     return stocks
@@ -396,18 +413,36 @@ def search_stocks(query: str, market: str = "", limit: int = 20) -> list[dict]:
     if not q:
         return []
 
-    # 尝试实时搜索
+    # Crypto 标的内建匹配
+    crypto_results: list[dict] = []
+    if market in ("", "CRYPTO"):
+        qu = q.upper()
+        for c in CRYPTO_LIST:
+            if qu in c["symbol"].upper() or qu in c["name"].upper():
+                crypto_results.append(c)
+
+    # 非 CRYPTO 市场搜索：走原有逻辑
+    if market and market != "CRYPTO":
+        results = _realtime_search(q, market, limit)
+        if len(results) >= limit:
+            return results[:limit]
+        cached = _cached_search(q, market, limit)
+        if not results:
+            return cached
+        seen = {(r.get("market"), r.get("symbol")) for r in results}
+        for r in cached:
+            key = (r.get("market"), r.get("symbol"))
+            if key in seen:
+                continue
+            results.append(r)
+            seen.add(key)
+            if len(results) >= limit:
+                break
+        return results
+
+    # 全部市场或 CRYPTO：合并实时搜索 + 缓存 + crypto
     results = _realtime_search(q, market, limit)
-    if len(results) >= limit:
-        return results[:limit]
-
-    # 实时搜索结果不足时，用缓存补全（便于聚合多市场搜索结果）
     cached = _cached_search(q, market, limit)
-    if not results:
-        if cached:
-            logger.info("实时搜索无结果，使用缓存搜索")
-        return cached
-
     seen = {(r.get("market"), r.get("symbol")) for r in results}
     for r in cached:
         key = (r.get("market"), r.get("symbol"))
@@ -415,9 +450,14 @@ def search_stocks(query: str, market: str = "", limit: int = 20) -> list[dict]:
             continue
         results.append(r)
         seen.add(key)
-        if len(results) >= limit:
-            break
-    return results
+
+    for r in crypto_results:
+        key = (r.get("market"), r.get("symbol"))
+        if key not in seen:
+            results.append(r)
+            seen.add(key)
+
+    return results[:limit]
 
 
 def _cached_search(query: str, market: str = "", limit: int = 20) -> list[dict]:

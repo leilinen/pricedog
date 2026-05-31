@@ -114,6 +114,88 @@ curl -X POST http://127.0.0.1:8001/api/v1/scan \
   -d '{"items":[{"market":"CRYPTO","symbol":"BTCUSDT"},{"market":"CRYPTO","symbol":"ETHUSDT"}],"interval":"5m","limit":120}'
 ```
 
+独立抓取回测数据：
+
+```bash
+python scripts/fetch_backtest_data.py \
+  --symbol BTCUSDT \
+  --start 2024-01-01T00:00:00Z \
+  --end 2024-03-01T00:00:00Z \
+  --interval 1h \
+  --output /tmp/btcusdt-1h.json
+```
+
+脚本特性：
+
+- 与服务解耦，不依赖 `price-action-engine` 运行。
+- `CRYPTO` 直接走交易所 REST 分页抓全量历史 K 线，Binance 优先，OKX fallback。
+- `CN`、`US`、`HK` 走 `akshare-adapter` HTTP 接口。
+- 输出 JSON 可直接作为后续回测输入；也支持 `--format csv`。
+
+统一回测数据规范：
+
+- `schema_version = "v1"`
+- `timezone = "UTC"`
+- `ts_mode = "bar_open"`，表示 `klines[].ts` 是这根 K 线的开始时间
+- `quality_mode = "continuous_24_7"` 表示按全天候连续交易检查，当前用于 crypto
+- `quality_mode = "best_effort"` 表示当前数据质量检查不含交易日历，当前用于股票
+- `interval` 表示这根 K 线的长度
+- 回测在处理某根 K 线时，应把该 K 线视为在 `ts + interval` 时刻才完整可用
+- `quality` 描述数据完整性，crypto 按 24/7 连续交易检查；股票在接入交易日历前只作为粗略参考
+
+标准 JSON 结构：
+
+```json
+{
+  "schema_version": "v1",
+  "market": "CRYPTO",
+  "symbol": "BTCUSDT",
+  "interval": "1h",
+  "source": "binance",
+  "timezone": "UTC",
+  "ts_mode": "bar_open",
+  "quality_mode": "continuous_24_7",
+  "start": "2024-01-01T00:00:00Z",
+  "end": "2024-03-01T00:00:00Z",
+  "count": 2,
+  "quality": {
+    "expected_bars": 2,
+    "actual_bars": 2,
+    "missing_bars": 0,
+    "duplicate_bars": 0,
+    "is_continuous": true,
+    "first_ts": "2024-01-01T00:00:00Z",
+    "last_ts": "2024-01-01T01:00:00Z",
+    "missing_timestamps_sample": []
+  },
+  "klines": [
+    {
+      "ts": "2024-01-01T00:00:00Z",
+      "open": 42000.0,
+      "high": 42500.0,
+      "low": 41800.0,
+      "close": 42300.0,
+      "volume": 100.0,
+      "turnover": 4215000.0
+    }
+  ]
+}
+```
+
+把抓取结果直接喂给回测接口：
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/v1/backtest \
+  -H 'Content-Type: application/json' \
+  --data @/tmp/btcusdt-1h.json
+```
+
+说明：
+
+- 回测接口会直接读取 JSON 里的 `market`、`symbol`、`interval`、`klines`。
+- 其他字段如 `schema_version`、`source`、`timezone`、`ts_mode`、`quality_mode`、`start`、`end`、`count`、`quality` 会被忽略，不影响回测。
+- 如果要覆盖默认回测参数，可以在 JSON 里额外加入 `max_holding_bars`、`fee_bps`、`slippage_bps`、`persist`。
+
 ## 环境变量
 
 核心配置见 `.env.example`。

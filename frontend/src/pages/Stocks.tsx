@@ -1328,12 +1328,13 @@ export default function StocksPage() {
     return value.toFixed(2)
   }
 
-  const marketLabel = (m: string) => m === 'CN' ? 'A股' : m === 'HK' ? '港股' : m === 'US' ? '美股' : m
+  const marketLabel = (m: string) => m === 'CN' ? 'A股' : m === 'HK' ? '港股' : m === 'US' ? '美股' : m === 'CRYPTO' ? '加密' : m
 
   // 市场徽章样式和短标签
   const marketBadge = (m: string) => {
     if (m === 'HK') return { style: 'bg-orange-500/10 text-orange-600', label: '港' }
     if (m === 'US') return { style: 'bg-green-500/10 text-green-600', label: '美' }
+    if (m === 'CRYPTO') return { style: 'bg-purple-500/10 text-purple-600', label: '币' }
     return { style: 'bg-blue-500/10 text-blue-600', label: 'A' }
   }
 
@@ -1762,6 +1763,7 @@ export default function StocksPage() {
                     { value: 'CN', label: 'A股' },
                     { value: 'HK', label: '港股' },
                     { value: 'US', label: '美股' },
+                    { value: 'CRYPTO', label: '加密' },
                   ].map(opt => (
                     <button
                       key={opt.value}
@@ -2287,6 +2289,7 @@ export default function StocksPage() {
                 { value: 'CN', label: 'A股', count: stocks.filter(s => s.market === 'CN').length },
                 { value: 'HK', label: '港股', count: stocks.filter(s => s.market === 'HK').length },
                 { value: 'US', label: '美股', count: stocks.filter(s => s.market === 'US').length },
+                { value: 'CRYPTO', label: '加密', count: stocks.filter(s => s.market === 'CRYPTO').length },
               ].map(opt => (
                 <button
                   key={opt.value}
@@ -2645,6 +2648,7 @@ export default function StocksPage() {
                       { value: 'CN', label: 'A股' },
                       { value: 'HK', label: '港股' },
                       { value: 'US', label: '美股' },
+                      { value: 'CRYPTO', label: '加密' },
                     ].map(opt => (
                       <button
                         key={opt.value}
