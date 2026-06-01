@@ -55,6 +55,37 @@ class EastMoneyDiscoveryCollector:
         mode: str = "turnover",
         limit: int = 20,
     ) -> list[HotStock]:
+        """优先走 data-provider，失败回退到东财"""
+        try:
+            from src.core.data_provider_client import get_data_provider
+
+            dp = get_data_provider()
+            data = await dp.get_hot_stocks(market=market, mode=mode, limit=limit)
+            if data:
+                return [
+                    HotStock(
+                        symbol=str(it.get("symbol", "")).strip(),
+                        market=it.get("market", market),
+                        name=str(it.get("name", "")).strip(),
+                        price=it.get("price"),
+                        change_pct=it.get("change_pct"),
+                        turnover=it.get("turnover"),
+                        volume=it.get("volume"),
+                    )
+                    for it in data
+                ]
+        except Exception as e:
+            logger.debug("data-provider hot_stocks fallback: %s", e)
+
+        return await self._fetch_hot_stocks_direct(market=market, mode=mode, limit=limit)
+
+    async def _fetch_hot_stocks_direct(
+        self,
+        *,
+        market: str = "CN",
+        mode: str = "turnover",
+        limit: int = 20,
+    ) -> list[HotStock]:
         market = (market or "CN").upper()
 
         fid = "f6" if mode == "turnover" else "f3"
@@ -107,6 +138,35 @@ class EastMoneyDiscoveryCollector:
         mode: str = "gainers",
         limit: int = 12,
     ) -> list[HotBoard]:
+        """优先走 data-provider，失败回退到东财"""
+        try:
+            from src.core.data_provider_client import get_data_provider
+
+            dp = get_data_provider()
+            data = await dp.get_hot_boards(mode=mode, limit=limit)
+            if data:
+                return [
+                    HotBoard(
+                        code=str(it.get("code", "")).strip(),
+                        name=str(it.get("name", "")).strip(),
+                        change_pct=it.get("change_pct"),
+                        change_amount=it.get("change_amount"),
+                        turnover=it.get("turnover"),
+                    )
+                    for it in data
+                ]
+        except Exception as e:
+            logger.debug("data-provider hot_boards fallback: %s", e)
+
+        return await self._fetch_hot_boards_direct(market=market, mode=mode, limit=limit)
+
+    async def _fetch_hot_boards_direct(
+        self,
+        *,
+        market: str = "CN",
+        mode: str = "gainers",
+        limit: int = 12,
+    ) -> list[HotBoard]:
         if market != "CN":
             return []
 
@@ -145,6 +205,41 @@ class EastMoneyDiscoveryCollector:
         return result
 
     async def fetch_board_stocks(
+        self,
+        *,
+        board_code: str,
+        mode: str = "gainers",
+        limit: int = 20,
+    ) -> list[HotStock]:
+        """优先走 data-provider，失败回退到东财"""
+        code = (board_code or "").strip()
+        if not code:
+            return []
+
+        try:
+            from src.core.data_provider_client import get_data_provider
+
+            dp = get_data_provider()
+            data = await dp.get_board_stocks(board_code=code, mode=mode, limit=limit)
+            if data:
+                return [
+                    HotStock(
+                        symbol=str(it.get("symbol", "")).strip(),
+                        market=it.get("market", ""),
+                        name=str(it.get("name", "")).strip(),
+                        price=it.get("price"),
+                        change_pct=it.get("change_pct"),
+                        turnover=it.get("turnover"),
+                        volume=it.get("volume"),
+                    )
+                    for it in data
+                ]
+        except Exception as e:
+            logger.debug("data-provider board_stocks fallback: %s", e)
+
+        return await self._fetch_board_stocks_direct(board_code=code, mode=mode, limit=limit)
+
+    async def _fetch_board_stocks_direct(
         self,
         *,
         board_code: str,

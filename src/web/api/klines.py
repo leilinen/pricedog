@@ -3,6 +3,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from src.core.data_provider_client import get_data_provider, _dp_klines_to_kline_data
 from src.collectors.kline_collector import KlineCollector
 from src.models.market import MarketCode
 
@@ -103,8 +104,9 @@ def _aggregate_klines(klines, interval: str) -> list:
 def get_klines(symbol: str, market: str = "CN", days: int = 60, interval: str = "1d"):
     """获取单只股票K线数据"""
     market_code = _parse_market(market)
-    collector = KlineCollector(market_code)
-    klines = collector.get_klines(symbol, days=days)
+    dp = get_data_provider()
+    raw = dp.sync_get_klines(market_code.value, symbol, interval="1d", limit=days)
+    klines = _dp_klines_to_kline_data(raw)
     klines = _aggregate_klines(klines, interval)
     return {
         "symbol": symbol,
@@ -122,12 +124,13 @@ def get_klines_batch(payload: KlineBatchRequest):
         return []
 
     results = []
+    dp = get_data_provider()
     for item in payload.items:
         market_code = _parse_market(item.market)
-        collector = KlineCollector(market_code)
         days = item.days or 60
         interval = item.interval or "1d"
-        klines = collector.get_klines(item.symbol, days=days)
+        raw = dp.sync_get_klines(market_code.value, item.symbol, interval="1d", limit=days)
+        klines = _dp_klines_to_kline_data(raw)
         klines = _aggregate_klines(klines, interval)
         results.append(
             {

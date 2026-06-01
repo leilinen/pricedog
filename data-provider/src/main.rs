@@ -29,13 +29,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(handlers::health::health))
         // Quotes
         .route(
-            "/api/v1/quote/{market}/{symbol}",
+            "/api/v1/quote/:market/:symbol",
             get(handlers::quote::get_quote),
         )
         .route("/api/v1/quotes/batch", post(handlers::quote::batch_quotes))
         // K-lines
         .route(
-            "/api/v1/klines/{market}/{symbol}",
+            "/api/v1/klines/:market/:symbol",
             get(handlers::kline::get_klines),
         )
         // News
@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/events", get(handlers::events::get_events))
         // Capital Flow
         .route(
-            "/api/v1/capital-flow/{market}/{symbol}",
+            "/api/v1/capital-flow/:market/:symbol",
             get(handlers::capital_flow::get_capital_flow),
         )
         // Discovery
@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
             get(handlers::discovery::get_hot_boards),
         )
         .route(
-            "/api/v1/discovery/boards/{board_code}/stocks",
+            "/api/v1/discovery/boards/:board_code/stocks",
             get(handlers::discovery::get_board_stocks),
         )
         .layer(CorsLayer::permissive())

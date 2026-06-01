@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from src.web.database import get_db
 from src.web.models import Account, Position, Stock
-from src.collectors.akshare_collector import _tencent_symbol, _fetch_tencent_quotes
+from src.core.data_provider_client import get_data_provider
 from src.models.market import MarketCode
 
 logger = logging.getLogger(__name__)
@@ -581,16 +581,17 @@ def _fetch_quotes_for_stocks(stocks: list[Stock]) -> dict:
     for s in stocks:
         market_stocks.setdefault(s.market, []).append(s)
 
+    dp = get_data_provider()
     quotes = {}
     for market, stock_list in market_stocks.items():
         try:
-            market_code = MarketCode(market)
+            MarketCode(market)
         except ValueError:
             continue
 
-        symbols = [_tencent_symbol(s.symbol, market_code) for s in stock_list]
+        items_list = [{"symbol": s.symbol, "market": market} for s in stock_list]
         try:
-            items = _fetch_tencent_quotes(symbols)
+            items = dp.sync_batch_quotes(items_list)
             for item in items:
                 quotes[item["symbol"]] = item
         except Exception as e:

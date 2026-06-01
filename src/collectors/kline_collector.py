@@ -483,7 +483,21 @@ class KlineCollector:
         self.market = market
 
     def get_klines(self, symbol: str, days: int = 60) -> list[KlineData]:
-        """获取日K线数据"""
+        """获取日K线数据 — 优先走 data-provider，失败回退到腾讯/东财/Stooq"""
+        try:
+            from src.core.data_provider_client import get_data_provider, _dp_klines_to_kline_data
+
+            dp = get_data_provider()
+            raw = dp.sync_get_klines(self.market.value, symbol, interval="1d", limit=days)
+            if raw:
+                return _dp_klines_to_kline_data(raw)
+        except Exception as e:
+            logger.debug("data-provider kline fallback for %s: %s", symbol, e)
+
+        return self._get_klines_direct(symbol, days)
+
+    def _get_klines_direct(self, symbol: str, days: int = 60) -> list[KlineData]:
+        """直接从腾讯/东财/Stooq获取日K线（回退路径）"""
         tencent_sym = _tencent_symbol(symbol, self.market)
 
         params = {

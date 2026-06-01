@@ -21,7 +21,7 @@ from src.web.models import (
     PriceAlertHit,
 )
 from src.web.stock_list import search_stocks, refresh_stock_list
-from src.collectors.akshare_collector import _tencent_symbol, _fetch_tencent_quotes
+from src.core.data_provider_client import get_data_provider
 from src.models.market import MarketCode, MARKETS
 from src.core.agent_catalog import AGENT_KIND_WORKFLOW, infer_agent_kind
 
@@ -225,9 +225,10 @@ def get_quotes(db: Session = Depends(get_db)):
                     logger.error(f"获取 {s.symbol} crypto 行情失败: {e}")
             continue
 
-        symbols = [_tencent_symbol(s.symbol, market_code) for s in stock_list]
+        dp_items = [{"symbol": s.symbol, "market": market} for s in stock_list]
         try:
-            items = _fetch_tencent_quotes(symbols)
+            dp = get_data_provider()
+            items = dp.sync_batch_quotes(dp_items)
             for item in items:
                 quotes[item["symbol"]] = {
                     "current_price": item["current_price"],

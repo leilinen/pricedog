@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 from typing import List
 
 from src.models.market import MarketCode
-from src.collectors.akshare_collector import _tencent_symbol, _fetch_tencent_quotes
+from src.core.data_provider_client import get_data_provider
 from src.collectors.kline_collector import KlineCollector
 from src.core.suggestion_pool import get_latest_suggestions
 import time
@@ -41,10 +41,10 @@ def insights_batch(payload: InsightsBatchRequest):
         market_items.setdefault(market_code, []).append(it.symbol)
 
     quotes_by_market: dict[MarketCode, dict[str, dict]] = {}
+    dp = get_data_provider()
     for market_code, symbols in market_items.items():
-        tencent_symbols = [_tencent_symbol(s, market_code) for s in symbols]
         try:
-            items = _fetch_tencent_quotes(tencent_symbols)
+            items = dp.sync_batch_quotes([{"symbol": s, "market": market_code.value} for s in symbols])
         except Exception:
             items = []
         quotes_by_market[market_code] = {item["symbol"]: item for item in items}

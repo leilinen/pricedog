@@ -58,7 +58,30 @@ class CapitalFlowCollector:
         self.market = market
 
     def get_capital_flow(self, symbol: str) -> CapitalFlow | None:
-        """获取单只股票的资金流向"""
+        """获取单只股票的资金流向 — 优先走 data-provider，失败回退到东财"""
+        try:
+            from src.core.data_provider_client import get_data_provider
+
+            dp = get_data_provider()
+            data = dp.sync_get_capital_flow(self.market.value, symbol)
+            if data:
+                return CapitalFlow(
+                    symbol=data.get("symbol", symbol),
+                    name=data.get("name", ""),
+                    main_net_inflow=float(data.get("main_net_inflow", 0)),
+                    main_net_inflow_pct=float(data.get("main_net_inflow_pct", 0)),
+                    super_net_inflow=float(data.get("super_net_inflow", 0)),
+                    big_net_inflow=float(data.get("big_net_inflow", 0)),
+                    mid_net_inflow=float(data.get("mid_net_inflow", 0)),
+                    small_net_inflow=float(data.get("small_net_inflow", 0)),
+                )
+        except Exception as e:
+            logger.debug("data-provider capital_flow fallback for %s: %s", symbol, e)
+
+        return self._get_capital_flow_direct(symbol)
+
+    def _get_capital_flow_direct(self, symbol: str) -> CapitalFlow | None:
+        """直接从东财获取资金流向（回退路径）"""
         secid = _get_eastmoney_secid(symbol, self.market)
 
         params = {

@@ -277,15 +277,12 @@ def _build_portfolio_context(db: Session) -> str:
 async def _fetch_realtime_context(symbol: str, market: str) -> str:
     """异步获取实时行情和技术面。"""
     try:
-        from src.collectors.akshare_collector import _fetch_tencent_quotes, _tencent_symbol
-        from src.models.market import MarketCode
+        from src.core.data_provider_client import get_data_provider
 
-        mc = MarketCode(market) if market in ("CN", "HK", "US") else MarketCode.CN
-        tsym = _tencent_symbol(symbol, mc)
-        rows = await asyncio.to_thread(_fetch_tencent_quotes, [tsym])
-        if not rows:
+        dp = get_data_provider()
+        q = await dp.get_quote(market, symbol)
+        if not q:
             return ""
-        q = rows[0]
         price = q.get("current_price", "--")
         change = q.get("change_pct", "--")
         volume = q.get("volume", "--")
