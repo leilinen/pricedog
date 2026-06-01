@@ -490,7 +490,11 @@ class KlineCollector:
             dp = get_data_provider()
             raw = dp.sync_get_klines(self.market.value, symbol, interval="1d", limit=days)
             if raw:
-                return _dp_klines_to_kline_data(raw)
+                klines = _dp_klines_to_kline_data(raw)
+                # 检查数据有效性：如果最新一根 K 线的 close 为 0，视为无效数据
+                if klines and klines[-1].close > 0:
+                    return klines
+                logger.debug("data-provider kline data invalid (close=0) for %s, falling back", symbol)
         except Exception as e:
             logger.debug("data-provider kline fallback for %s: %s", symbol, e)
 
