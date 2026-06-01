@@ -65,13 +65,13 @@ const TYPE_LABEL: Record<ConditionType, string> = {
   turnover: '成交额',
   volume: '成交量',
   volume_ratio: '量比',
-  signal_bar: '信号K线',
+  signal_bar: '盯盘K线提醒',
 }
 
 const SIGNAL_BAR_OPTIONS = [
-  { value: 'any', label: '任意信号K' },
-  { value: 'pa_signal_bar', label: '常规信号K' },
-  { value: 'pa_pattern', label: '特殊形态' },
+  { value: 'any', label: '任意盯盘K线' },
+  { value: 'pa_signal_bar', label: '常规信号K提醒' },
+  { value: 'pa_pattern', label: '特殊形态提醒' },
 ]
 
 const INTERVAL_OPTIONS = [

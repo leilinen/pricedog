@@ -26,9 +26,8 @@ struct AppState {
     db_url: String,
     kline_cache: Cache<String, Vec<Kline>>,
     quote_cache: Cache<String, Quote>,
-    akshare_base_url: String,
+    data_provider_url: String,
     provider_status: Arc<RwLock<HashMap<String, ProviderStatus>>>,
-    model: Arc<dyn BreakoutModel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,7 +92,9 @@ struct ProviderStatus {
 #[derive(Debug, Clone, Serialize)]
 struct Indicators {
     ema20: Option<f64>,
+    ema5: Option<f64>,
     atr14: Option<f64>,
+    atr20: Option<f64>,
     ema20_position: Option<f64>,
     volume_ratio: Option<f64>,
     amplitude: Option<f64>,
@@ -145,15 +146,17 @@ struct BarFeatures {
 struct ContextResult {
     cr: f64,        // 通道比率 = (H_N - L_N) / ATR_M
     trend_dir: i32, // 趋势方向: 1=多, -1=空, 0=中性
+    ma_cross_dir: Option<i32>, // 金叉/死叉方向: 1=金叉, -1=死叉, None=未检测到
     f_ratio: f64,   // 多空力量对比
     is_valid: bool, // CR >= θ（非窄通道）
 }
 
 // ---------------------------------------------------------------------------
-// BreakoutModel trait — pluggable model interface
+// PriceActionModel trait — pluggable model interface
 // ---------------------------------------------------------------------------
 
-trait BreakoutModel: Send + Sync {
+trait PriceActionModel: Send + Sync {
+    fn code(&self) -> &str;
     fn name(&self) -> &str;
     fn version(&self) -> &str;
     fn min_klines(&self) -> usize;
@@ -174,7 +177,11 @@ trait BreakoutModel: Send + Sync {
 
 struct V2Model;
 
-impl BreakoutModel for V2Model {
+impl PriceActionModel for V2Model {
+    fn code(&self) -> &str {
+        "pa_breakout_v2"
+    }
+
     fn name(&self) -> &str {
         "pricedog_pa_breakout"
     }
@@ -206,6 +213,131 @@ impl BreakoutModel for V2Model {
     }
 }
 
+struct SignalBarModel;
+
+impl PriceActionModel for SignalBarModel {
+    fn code(&self) -> &str {
+        "pa_signal_bar_v1"
+    }
+
+    fn name(&self) -> &str {
+        "pricedog_pa_signal_bar"
+    }
+
+    fn version(&self) -> &str {
+        "v1"
+    }
+
+    fn min_klines(&self) -> usize {
+        25
+    }
+
+    fn detect(&self, klines: &[Kline]) -> Vec<Signal> {
+        detect_signal_bar(klines)
+    }
+
+    fn backtest(
+        &self,
+        klines: &[Kline],
+        max_holding_bars: usize,
+        fee_bps: f64,
+        slippage_bps: f64,
+    ) -> Vec<BacktestTrade> {
+        backtest_trades_from_model(self, klines, max_holding_bars, fee_bps, slippage_bps)
+    }
+
+    fn generate_candidates(
+        &self,
+        klines: &[Kline],
+        max_candidates: usize,
+    ) -> Vec<SampleCandidate> {
+        generate_sample_candidates_from_model(self, klines, max_candidates)
+    }
+}
+
+fn resolve_model(model_code: &str) -> Result<Box<dyn PriceActionModel>> {
+    match model_code.trim() {
+        "" | "pa_breakout_v2" | "pricedog_pa_breakout" => Ok(Box::new(V2Model)),
+        "pa_signal_bar_v1" | "pricedog_pa_signal_bar" => Ok(Box::new(SignalBarModel)),
+        "pa_ema20_cross_v1" | "pricedog_pa_ema20_cross" => Ok(Box::new(Ema20CrossModel)),
+        other => Err(anyhow!("unknown model_code: {}", other)),
+    }
+}
+
+struct Ema20CrossModel;
+
+impl PriceActionModel for Ema20CrossModel {
+    fn code(&self) -> &str { "pa_ema20_cross_v1" }
+    fn name(&self) -> &str { "pricedog_pa_ema20_cross" }
+    fn version(&self) -> &str { "v1" }
+    fn min_klines(&self) -> usize { 22 }
+
+    fn detect(&self, klines: &[Kline]) -> Vec<Signal> {
+        if klines.len() < 22 {
+            return Vec::new();
+        }
+        let curr = klines.last().unwrap();
+        let prev = &klines[klines.len() - 2];
+        let indicators = compute_indicators(klines);
+        let curr_ema20 = indicators.ema20.unwrap_or(0.0);
+        let prev_closes: Vec<f64> = klines[..klines.len()-1].iter().map(|k| k.close).collect();
+        let prev_ema20_vals = ema(&prev_closes, 20);
+        let prev_ema20 = prev_ema20_vals.last().copied().unwrap_or(0.0);
+        if curr_ema20 <= 0.0 || prev_ema20 <= 0.0 {
+            return Vec::new();
+        }
+
+        let crossed_up = prev.close <= prev_ema20 && curr.close > curr_ema20;
+        let crossed_down = prev.close >= prev_ema20 && curr.close < curr_ema20;
+        let (direction, reason) = if crossed_up {
+            ("long", format!("EMA20 cross up: prev_c={:.2} prev_ema20={:.2} curr_c={:.2} curr_ema20={:.2}", prev.close, prev_ema20, curr.close, curr_ema20))
+        } else if crossed_down {
+            ("short", format!("EMA20 cross down: prev_c={:.2} prev_ema20={:.2} curr_c={:.2} curr_ema20={:.2}", prev.close, prev_ema20, curr.close, curr_ema20))
+        } else {
+            return Vec::new();
+        };
+
+        let delta = SIGNAL_BAR_TICK_SIZE;
+        let (entry, stop, target) = if direction == "long" {
+            let e = curr.high + delta;
+            let s = curr.low - delta;
+            (e, s, e + 2.0 * (e - s))
+        } else {
+            let e = curr.low - delta;
+            let s = curr.high + delta;
+            (e, s, e - 2.0 * (s - e))
+        };
+
+        vec![Signal {
+            signal_type: "pa_ema20_cross".to_string(),
+            direction: direction.to_string(),
+            score: 0.6,
+            ema20_entry_score: 0.0,
+            entry_price: Some((entry * 100.0).round() / 100.0),
+            stop_loss: Some((stop * 100.0).round() / 100.0),
+            target_price: Some((target * 100.0).round() / 100.0),
+            reason,
+            evidence: json!({
+                "model_code": "pa_ema20_cross_v1",
+                "type": "ema20_cross",
+                "direction": direction,
+                "prev_close": prev.close,
+                "prev_ema20": prev_ema20,
+                "curr_close": curr.close,
+                "curr_ema20": curr_ema20,
+            }),
+        }]
+    }
+
+    fn backtest(&self, klines: &[Kline], max_holding_bars: usize, fee_bps: f64, slippage_bps: f64) -> Vec<BacktestTrade> {
+        backtest_trades_from_model(self, klines, max_holding_bars, fee_bps, slippage_bps)
+    }
+
+    fn generate_candidates(&self, klines: &[Kline], max_candidates: usize) -> Vec<SampleCandidate> {
+        generate_sample_candidates_from_model(self, klines, max_candidates)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct KlineQuery {
     interval: Option<String>,
@@ -224,6 +356,7 @@ struct SampleCandidateQuery {
     interval: Option<String>,
     limit: Option<usize>,
     max_candidates: Option<usize>,
+    model_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -248,6 +381,8 @@ struct BacktestRequest {
     symbol: String,
     #[serde(default = "default_interval")]
     interval: String,
+    #[serde(default = "default_model_code")]
+    model_code: String,
     #[serde(default = "default_strategy_code")]
     strategy_code: String,
     #[serde(default = "default_strategy_name")]
@@ -311,6 +446,8 @@ struct EvaluateRequest {
     symbol: String,
     #[serde(default = "default_interval")]
     interval: String,
+    #[serde(default = "default_model_code")]
+    model_code: String,
     #[serde(default)]
     klines: Vec<Kline>,
     #[serde(default)]
@@ -324,6 +461,8 @@ struct ScanRequest {
     items: Vec<ScanItem>,
     #[serde(default = "default_interval")]
     interval: String,
+    #[serde(default = "default_model_code")]
+    model_code: String,
     #[serde(default = "default_limit")]
     limit: usize,
     #[serde(default)]
@@ -356,8 +495,12 @@ fn default_custom_market() -> String {
     "CUSTOM".to_string()
 }
 
+fn default_model_code() -> String {
+    "pa_breakout_v2".to_string()
+}
+
 fn default_strategy_code() -> String {
-    "pricedog_pa_breakout".to_string()
+    default_model_code()
 }
 
 fn default_strategy_name() -> String {
@@ -419,12 +562,12 @@ async fn main() -> Result<()> {
             .time_to_live(Duration::from_secs(10))
             .max_capacity(10_000)
             .build(),
-        akshare_base_url: env::var("AKSHARE_ADAPTER_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:8002".to_string())
+        data_provider_url: env::var("DATA_PROVIDER_URL")
+            .or_else(|_| env::var("AKSHARE_ADAPTER_URL"))
+            .unwrap_or_else(|_| "http://127.0.0.1:8003".to_string())
             .trim_end_matches('/')
             .to_string(),
         provider_status: Arc::new(RwLock::new(HashMap::new())),
-        model: Arc::new(V2Model),
     });
     start_crypto_ws_collectors(state.clone());
     start_crypto_kline_backfill_monitor(state.clone());
@@ -1013,8 +1156,18 @@ async fn get_sample_candidates(
     let interval = normalize_interval(query.interval.as_deref().unwrap_or("5m"));
     let limit = query.limit.unwrap_or(600);
     let max_candidates = query.max_candidates.unwrap_or(100).min(500);
+    let model_code = query.model_code.as_deref().unwrap_or("pa_breakout_v2");
 
-    match build_sample_candidates(&state, &market, &symbol, &interval, limit, max_candidates).await
+    match build_sample_candidates(
+        &state,
+        &market,
+        &symbol,
+        &interval,
+        model_code,
+        limit,
+        max_candidates,
+    )
+    .await
     {
         Ok(value) => Json(value).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
@@ -1040,6 +1193,7 @@ async fn evaluate(
         &req.market,
         &req.symbol,
         &req.interval,
+        &req.model_code,
         120,
         req.klines,
         req.refresh,
@@ -1073,6 +1227,7 @@ async fn scan(
             &item.market,
             &item.symbol,
             &req.interval,
+            &req.model_code,
             req.limit,
             Vec::new(),
             req.refresh,
@@ -1109,11 +1264,13 @@ async fn evaluate_symbol(
     market: &str,
     symbol: &str,
     interval: &str,
+    model_code: &str,
     limit: usize,
     input_klines: Vec<Kline>,
     refresh: bool,
     persist_signal: bool,
 ) -> Result<Value> {
+    let model = resolve_model(model_code)?;
     let interval = normalize_interval(interval);
     let mut klines = if input_klines.is_empty() {
         fetch_klines(state, market, symbol, &interval, limit, refresh).await?
@@ -1121,18 +1278,13 @@ async fn evaluate_symbol(
         input_klines
     };
     klines.sort_by(|a, b| a.ts.cmp(&b.ts));
-    if klines.len() < state.model.min_klines() {
-        return Err(anyhow!("need at least {} klines", state.model.min_klines()));
+    if klines.len() < model.min_klines() {
+        return Err(anyhow!("need at least {} klines", model.min_klines()));
     }
     let indicators = compute_indicators(&klines);
-    let signals = state.model.detect(&klines);
-
-    // Signal Bar Model — 信号K线识别
-    let sbm_signals = detect_signal_bar(&klines);
-
-    let all_signals = [signals, sbm_signals].concat();
+    let signals = model.detect(&klines);
     if persist_signal {
-        for signal in &all_signals {
+        for signal in &signals {
             persist_signal_row(
                 state,
                 market,
@@ -1150,20 +1302,28 @@ async fn evaluate_symbol(
         "market": market,
         "symbol": symbol,
         "interval": interval,
+        "model_code": model.code(),
+        "model_name": model.name(),
+        "model_version": model.version(),
         "indicators": indicators,
-        "signals": all_signals,
+        "signals": signals,
     }))
 }
 
 async fn run_backtest(state: &AppState, req: BacktestRequest) -> Result<Value> {
+    let model = resolve_model(&req.model_code)?;
     let market = req.market.trim().to_ascii_uppercase();
     let symbol = req.symbol.trim().to_ascii_uppercase();
     let interval = normalize_interval(&req.interval);
-    let strategy_code = req.strategy_code.trim().to_string();
+    let strategy_code = if req.strategy_code.trim().is_empty() {
+        model.code().to_string()
+    } else {
+        req.strategy_code.trim().to_string()
+    };
     let strategy_name = req.strategy_name.trim().to_string();
     let strategy_version = req.strategy_version.trim().to_string();
-    if req.klines.len() < state.model.min_klines() {
-        return Err(anyhow!("need at least {} klines", state.model.min_klines()));
+    if req.klines.len() < model.min_klines() {
+        return Err(anyhow!("need at least {} klines", model.min_klines()));
     }
     if req.max_holding_bars == 0 {
         return Err(anyhow!("max_holding_bars must be greater than 0"));
@@ -1171,9 +1331,7 @@ async fn run_backtest(state: &AppState, req: BacktestRequest) -> Result<Value> {
 
     let mut klines = req.klines;
     klines.sort_by(|a, b| a.ts.cmp(&b.ts));
-    let trades = state
-        .model
-        .backtest(&klines, req.max_holding_bars, req.fee_bps, req.slippage_bps);
+    let trades = model.backtest(&klines, req.max_holding_bars, req.fee_bps, req.slippage_bps);
     let summary = summarize_backtest(&trades);
     let trace_id = format!("bt-{}-{}", symbol, Utc::now().timestamp_millis());
     let run_id = if req.persist {
@@ -1219,6 +1377,9 @@ async fn run_backtest(state: &AppState, req: BacktestRequest) -> Result<Value> {
         "market": market,
         "symbol": symbol,
         "interval": interval,
+        "model_code": model.code(),
+        "model_name": model.name(),
+        "model_version": model.version(),
         "strategy_code": strategy_code,
         "strategy_name": strategy_name,
         "strategy_version": strategy_version,
@@ -1355,17 +1516,22 @@ async fn build_sample_candidates(
     market: &str,
     symbol: &str,
     interval: &str,
+    model_code: &str,
     limit: usize,
     max_candidates: usize,
 ) -> Result<Value> {
+    let model = resolve_model(model_code)?;
     let interval = normalize_interval(interval);
     let bars = fetch_klines(state, market, symbol, &interval, limit, false).await?;
-    let candidates = state.model.generate_candidates(&bars, max_candidates);
+    let candidates = model.generate_candidates(&bars, max_candidates);
     Ok(json!({
         "ok": true,
         "market": market,
         "symbol": symbol,
         "interval": interval,
+        "model_code": model.code(),
+        "model_name": model.name(),
+        "model_version": model.version(),
         "rows_scanned": bars.len(),
         "candidate_count": candidates.len(),
         "candidates": candidates,
@@ -1466,6 +1632,132 @@ fn generate_sample_candidates_v2(klines: &[Kline], max_candidates: usize) -> Vec
         out = out[out.len() - max_candidates..].to_vec();
     }
     out
+}
+
+fn generate_sample_candidates_from_model(
+    model: &dyn PriceActionModel,
+    klines: &[Kline],
+    max_candidates: usize,
+) -> Vec<SampleCandidate> {
+    if klines.len() < model.min_klines() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut last_long_idx: Option<usize> = None;
+    let mut last_short_idx: Option<usize> = None;
+    for current_idx in model.min_klines() - 1..klines.len() {
+        let window = &klines[..=current_idx];
+        let indicators = compute_indicators(window);
+        for signal in model.detect(window) {
+            if signal_bar_cooldown_blocks(model.code(), current_idx, &signal.direction, last_long_idx, last_short_idx) {
+                continue;
+            }
+            let curr = &klines[current_idx];
+            out.push(SampleCandidate {
+                ts: curr.ts.clone(),
+                candidate_type: signal.signal_type.clone(),
+                direction: signal.direction.clone(),
+                label: None,
+                current_price: curr.close,
+                ema20: indicators.ema20,
+                atr14: indicators.atr14,
+                ema20_position: indicators.ema20_position,
+                volume_ratio: indicators.volume_ratio,
+                score: Some(signal.score),
+                evidence: signal.evidence.clone(),
+            });
+            remember_signal_idx(&signal.direction, current_idx, &mut last_long_idx, &mut last_short_idx);
+        }
+    }
+    if out.len() > max_candidates {
+        out = out[out.len() - max_candidates..].to_vec();
+    }
+    out
+}
+
+fn backtest_trades_from_model(
+    model: &dyn PriceActionModel,
+    klines: &[Kline],
+    max_holding_bars: usize,
+    fee_bps: f64,
+    slippage_bps: f64,
+) -> Vec<BacktestTrade> {
+    if klines.len() < model.min_klines() {
+        return Vec::new();
+    }
+    let mut trades = Vec::new();
+    let mut last_long_idx: Option<usize> = None;
+    let mut last_short_idx: Option<usize> = None;
+    for current_idx in model.min_klines() - 1..klines.len() {
+        let window = &klines[..=current_idx];
+        for signal in model.detect(window) {
+            if signal_bar_cooldown_blocks(model.code(), current_idx, &signal.direction, last_long_idx, last_short_idx) {
+                continue;
+            }
+            if let Some(trade) = simulate_backtest_trade(
+                klines,
+                current_idx,
+                &signal,
+                max_holding_bars,
+                fee_bps,
+                slippage_bps,
+            ) {
+                let curr = &klines[current_idx];
+                trades.push(BacktestTrade {
+                    ts: curr.ts.clone(),
+                    direction: signal.direction.clone(),
+                    signal_type: signal.signal_type.clone(),
+                    score: signal.score,
+                    entry_price: trade.0,
+                    stop_loss: signal.stop_loss,
+                    target_price: signal.target_price,
+                    exit_ts: trade.1.ts.clone(),
+                    exit_price: trade.2,
+                    exit_reason: trade.3.clone(),
+                    holding_bars: trade.4,
+                    return_pct: trade.5,
+                    hit_target: trade.3 == "hit_target",
+                    hit_stop: trade.3 == "hit_stop",
+                    signal: signal.signal_type.clone(),
+                    reason: signal.reason.clone(),
+                    evidence: signal.evidence.clone(),
+                });
+                remember_signal_idx(&signal.direction, current_idx, &mut last_long_idx, &mut last_short_idx);
+            }
+        }
+    }
+    trades
+}
+
+fn signal_bar_cooldown_blocks(
+    model_code: &str,
+    current_idx: usize,
+    direction: &str,
+    last_long_idx: Option<usize>,
+    last_short_idx: Option<usize>,
+) -> bool {
+    if model_code != "pa_signal_bar_v1" || SIGNAL_BAR_COOLDOWN_BARS == 0 {
+        return false;
+    }
+    let last_idx = if direction == "long" {
+        last_long_idx
+    } else {
+        last_short_idx
+    };
+    last_idx.is_some_and(|idx| current_idx.saturating_sub(idx) <= SIGNAL_BAR_COOLDOWN_BARS)
+}
+
+fn remember_signal_idx(
+    direction: &str,
+    current_idx: usize,
+    last_long_idx: &mut Option<usize>,
+    last_short_idx: &mut Option<usize>,
+) {
+    if direction == "long" {
+        *last_long_idx = Some(current_idx);
+    } else {
+        *last_short_idx = Some(current_idx);
+    }
 }
 
 fn backtest_trades_v2(
@@ -1823,29 +2115,26 @@ async fn fetch_stock_klines(
     limit: usize,
 ) -> Result<KlineFetch> {
     let url = format!(
-        "{}/klines/{}/{}?interval={}&limit={}",
-        state.akshare_base_url, market, symbol, interval, limit
+        "{}/api/v1/klines/{}/{}?interval={}&limit={}",
+        state.data_provider_url, market, symbol, interval, limit
     );
     let payload = get_json_with_retry(&state.client, &url).await?;
-    if !payload
-        .get("success")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    let code = payload.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if code != 0 {
         return Err(anyhow!(payload
-            .get("error")
+            .get("message")
             .and_then(|v| v.as_str())
-            .unwrap_or("akshare error")
+            .unwrap_or("data-provider kline error")
             .to_string()));
     }
     let data = payload
         .get("data")
         .cloned()
-        .ok_or_else(|| anyhow!("missing akshare data"))?;
+        .ok_or_else(|| anyhow!("missing kline data"))?;
     let source = data
         .get("source")
         .and_then(|v| v.as_str())
-        .unwrap_or("akshare")
+        .unwrap_or("data-provider")
         .to_string();
     let klines = data.get("klines").cloned().unwrap_or_else(|| json!([]));
     Ok(KlineFetch {
@@ -2051,17 +2340,14 @@ async fn fetch_quote(state: &AppState, market: &str, symbol: &str) -> Result<Quo
 }
 
 async fn fetch_stock_quote(state: &AppState, market: &str, symbol: &str) -> Result<Quote> {
-    let url = format!("{}/quote/{}/{}", state.akshare_base_url, market, symbol);
+    let url = format!("{}/api/v1/quote/{}/{}", state.data_provider_url, market, symbol);
     let payload = get_json_with_retry(&state.client, &url).await?;
-    if !payload
-        .get("success")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    let code = payload.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if code != 0 {
         return Err(anyhow!(payload
-            .get("error")
+            .get("message")
             .and_then(|v| v.as_str())
-            .unwrap_or("akshare quote error")
+            .unwrap_or("data-provider quote error")
             .to_string()));
     }
     let data = payload
@@ -2272,10 +2558,14 @@ fn parse_ts_millis(ts: &str) -> Option<i64> {
 
 fn compute_indicators(klines: &[Kline]) -> Indicators {
     let closes: Vec<f64> = klines.iter().map(|k| k.close).collect();
-    let ema = ema(&closes, 20);
-    let atr = atr(klines, 14);
-    let ema20 = ema.last().copied();
-    let atr14 = atr.last().copied().flatten();
+    let ema20_vals = ema(&closes, 20);
+    let ema5_vals = ema(&closes, 5);
+    let atr14_values = atr(klines, 14);
+    let atr20_values = atr(klines, 20);
+    let ema20 = ema20_vals.last().copied();
+    let ema5 = ema5_vals.last().copied();
+    let atr14 = atr14_values.last().copied().flatten();
+    let atr20 = atr20_values.last().copied().flatten();
     let close = closes.last().copied().unwrap_or(0.0);
     let ema20_position = match (ema20, atr14) {
         (Some(e), Some(a)) if a > 0.0 => Some((close - e) / a),
@@ -2308,7 +2598,9 @@ fn compute_indicators(klines: &[Kline]) -> Indicators {
     };
     Indicators {
         ema20,
+        ema5,
         atr14,
+        atr20,
         ema20_position,
         volume_ratio,
         amplitude,
@@ -2774,7 +3066,7 @@ fn evaluate_context(klines: &[Kline], indicators: &Indicators) -> ContextResult 
     let p = 5; // 力量对比窗口
     let theta = 1.2; // 窄通道阈值
 
-    let atr_m = indicators.atr14.unwrap_or(0.0);
+    let atr_m = indicators.atr20.unwrap_or(0.0);
 
     // 通道宽度
     let start = klines.len().saturating_sub(n);
@@ -2825,12 +3117,44 @@ fn evaluate_context(klines: &[Kline], indicators: &Indicators) -> ContextResult 
     ContextResult {
         cr: (cr * 100.0).round() / 100.0,
         trend_dir,
+        ma_cross_dir: detect_ma_cross(klines),
         f_ratio: (f_ratio * 100.0).round() / 100.0,
         is_valid: cr >= theta,
     }
 }
 
 /// 计算 P 根K线前的 F_ratio（用于判断力量翻转）
+
+fn detect_ma_cross(klines: &[Kline]) -> Option<i32> {
+    if klines.len() < 6 {
+        return None;
+    }
+    let search_end = klines.len();
+    let search_start = search_end.saturating_sub(SIGNAL_BAR_MA_CROSS_LOOKBACK);
+    for i in (search_start + 1)..search_end {
+        let closes: Vec<f64> = klines[..=i].iter().map(|k| k.close).collect();
+        if closes.len() < 2 {
+            continue;
+        }
+        let ema5_vals = ema(&closes, 5);
+        let ema20_vals = ema(&closes, 20);
+        if ema5_vals.len() < 2 || ema20_vals.len() < 2 {
+            continue;
+        }
+        let prev_ema5 = ema5_vals[ema5_vals.len() - 2];
+        let prev_ema20 = ema20_vals[ema20_vals.len() - 2];
+        let curr_ema5 = ema5_vals[ema5_vals.len() - 1];
+        let curr_ema20 = ema20_vals[ema20_vals.len() - 1];
+        if prev_ema5 <= prev_ema20 && curr_ema5 > curr_ema20 {
+            return Some(1);
+        }
+        if prev_ema5 >= prev_ema20 && curr_ema5 < curr_ema20 {
+            return Some(-1);
+        }
+    }
+    None
+}
+
 fn compute_prev_f_ratio(klines: &[Kline], offset: usize, window: usize) -> f64 {
     let end = klines.len().saturating_sub(offset);
     let start = end.saturating_sub(window);
@@ -2880,10 +3204,80 @@ fn score_quality_short(f: &BarFeatures) -> f64 {
 }
 
 /// SignalBarModel 主检测函数：识别最后一根K线是否为信号K线
+const SIGNAL_BAR_Q_MIN: f64 = 1.0;
+const SIGNAL_BAR_COOLDOWN_BARS: usize = 6;
+const SIGNAL_BAR_REQUIRE_PATTERN_CONTEXT: bool = true;
+const SIGNAL_BAR_REQUIRE_TREND_ALIGN: bool = true;
+const SIGNAL_BAR_USE_MA_CROSS: bool = false;
+const SIGNAL_BAR_MA_CROSS_LOOKBACK: usize = 24;
+const SIGNAL_BAR_SURPRISE_LOOKBACK: usize = 20;
+const SIGNAL_BAR_TICK_SIZE: f64 = 0.01;
+
+fn signal_bar_trend_allows(direction: &str, context: &ContextResult) -> bool {
+    if !SIGNAL_BAR_REQUIRE_TREND_ALIGN {
+        return true;
+    }
+    if SIGNAL_BAR_USE_MA_CROSS {
+        return (direction == "long" && context.ma_cross_dir.unwrap_or(0) > 0)
+            || (direction == "short" && context.ma_cross_dir.unwrap_or(0) < 0);
+    }
+    (direction == "long" && context.trend_dir > 0)
+        || (direction == "short" && context.trend_dir < 0)
+}
+
+fn signal_bar_force_allows(
+    direction: &str,
+    context: &ContextResult,
+    f_ratio_flipped: bool,
+) -> bool {
+    (direction == "long" && (context.f_ratio > 0.0 || f_ratio_flipped))
+        || (direction == "short" && (context.f_ratio < 0.0 || f_ratio_flipped))
+}
+
+fn signal_bar_context_allows(
+    direction: &str,
+    context: &ContextResult,
+    f_ratio_flipped: bool,
+) -> bool {
+    context.is_valid
+        && signal_bar_trend_allows(direction, context)
+        && signal_bar_force_allows(direction, context, f_ratio_flipped)
+}
+
+fn signal_bar_direction_label(direction: &str) -> &'static str {
+    if direction == "long" {
+        "向上"
+    } else {
+        "向下"
+    }
+}
+
+fn signal_bar_alert_level(quality: f64, pattern_type: &str) -> &'static str {
+    if quality >= 1.0 || pattern_type == "2k_reversal" || pattern_type == "surprise_bar" {
+        "high"
+    } else {
+        "medium"
+    }
+}
+
+fn signal_bar_alert_reason(
+    direction: &str,
+    pattern_label: &str,
+    quality: f64,
+    context: &ContextResult,
+) -> String {
+    format!(
+        "盯盘提醒: {}出现{}K线，质量{:.1}，通道CR={:.2}，力量比={:.2}。用于提示未来数根K线可能有波动，需结合盘口/成交量/关键位人工确认。",
+        signal_bar_direction_label(direction),
+        pattern_label,
+        quality,
+        context.cr,
+        context.f_ratio
+    )
+}
+
 fn detect_signal_bar(klines: &[Kline]) -> Vec<Signal> {
     const MIN_KLINES: usize = 25;
-    const Q_MIN: f64 = 0.6;
-    const SURPRISE_LOOKBACK: usize = 20;
 
     if klines.len() < MIN_KLINES {
         return Vec::new();
@@ -2896,19 +3290,25 @@ fn detect_signal_bar(klines: &[Kline]) -> Vec<Signal> {
 
     let indicators = compute_indicators(klines);
     let atr14 = indicators.atr14.unwrap_or(0.0);
-    let delta = if atr14 > 0.0 { atr14 * 0.01 } else { 0.0 };
+    let atr20 = indicators.atr20.unwrap_or(0.0);
+    let delta = SIGNAL_BAR_TICK_SIZE;
 
     let f_curr = compute_bar_features(curr);
     let f_prev = compute_bar_features(prev);
 
     let q_long = score_quality_long(&f_curr);
     let q_short = score_quality_short(&f_curr);
+    let context = evaluate_context(klines, &indicators);
+    let prev_f = compute_prev_f_ratio(klines, 5, 5);
+    let long_f_ratio_flipped = context.f_ratio.signum() != prev_f.signum() && prev_f < 0.0;
+    let short_f_ratio_flipped = context.f_ratio.signum() != prev_f.signum() && prev_f > 0.0;
 
-    // 入场参数计算辅助
+    // 参考价位仅用于盯盘确认和兼容既有回测字段，不代表自动交易指令。
     let make_signal = |direction: &str,
                        quality: f64,
                        signal_type: &str,
-                       reason: String,
+                       pattern_type: &str,
+                       pattern_label: &str,
                        pattern_evidence: Value|
      -> Signal {
         let (entry, stop, target) = if direction == "long" {
@@ -2930,8 +3330,50 @@ fn detect_signal_bar(klines: &[Kline]) -> Vec<Signal> {
             entry_price: Some((entry * 100.0).round() / 100.0),
             stop_loss: Some((stop * 100.0).round() / 100.0),
             target_price: Some((target * 100.0).round() / 100.0),
-            reason,
+            reason: signal_bar_alert_reason(direction, pattern_label, quality, &context),
             evidence: json!({
+                "model_code": "pa_signal_bar_v1",
+                "alert_purpose": "watchlist_monitor",
+                "alert_semantics": "human_review_required",
+                "alert_level": signal_bar_alert_level(quality, pattern_type),
+                "watch_alert": {
+                    "direction_hint": direction,
+                    "direction_label": signal_bar_direction_label(direction),
+                    "pattern_type": pattern_type,
+                    "pattern_label": pattern_label,
+                    "quality": quality,
+                    "expected_use": "提醒人工盯盘，不等同于自动买卖信号",
+                    "review_checklist": [
+                        "下一根K线是否延续并放量",
+                        "是否靠近前高/前低/EMA20/整数位等关键价位",
+                        "是否先出现反向1ATR级别波动",
+                        "若没有后续确认则忽略提醒"
+                    ],
+                    "reference_levels": {
+                        "trigger_price": (entry * 100.0).round() / 100.0,
+                        "invalidation_price": (stop * 100.0).round() / 100.0,
+                        "observation_target": (target * 100.0).round() / 100.0
+                    },
+                    "historical_watch_eval": {
+                        "dataset": "BTCUSDT 1h 2026-01-01..2026-03-30",
+                        "sample_count_after_cooldown": 144,
+                        "horizon_6bar": {
+                            "opportunity_0_5atr_rate": 0.7014,
+                            "opportunity_1atr_rate": 0.5069,
+                            "noise_no_0_5atr_rate": 0.2986
+                        },
+                        "horizon_12bar": {
+                            "opportunity_0_5atr_rate": 0.7917,
+                            "opportunity_1atr_rate": 0.6319,
+                            "noise_no_0_5atr_rate": 0.2083
+                        },
+                        "horizon_24bar": {
+                            "opportunity_0_5atr_rate": 0.8611,
+                            "opportunity_1atr_rate": 0.7569,
+                            "noise_no_0_5atr_rate": 0.1389
+                        }
+                    }
+                },
                 "bar_features": {
                     "body": (f_curr.body * 10000.0).round() / 10000.0,
                     "range": (f_curr.range * 10000.0).round() / 10000.0,
@@ -2943,7 +3385,15 @@ fn detect_signal_bar(klines: &[Kline]) -> Vec<Signal> {
                 "q_long": q_long,
                 "q_short": q_short,
                 "atr14": (atr14 * 10000.0).round() / 10000.0,
+                "atr20": (atr20 * 10000.0).round() / 10000.0,
+                "tick_size": SIGNAL_BAR_TICK_SIZE,
                 "delta": (delta * 10000.0).round() / 10000.0,
+                "optimized_params": {
+                    "q_min": SIGNAL_BAR_Q_MIN,
+                    "cooldown_bars": SIGNAL_BAR_COOLDOWN_BARS,
+                    "require_pattern_context": SIGNAL_BAR_REQUIRE_PATTERN_CONTEXT,
+                    "require_trend_align": SIGNAL_BAR_REQUIRE_TREND_ALIGN,
+                },
                 "pattern": pattern_evidence,
             }),
         }
@@ -2954,94 +3404,110 @@ fn detect_signal_bar(klines: &[Kline]) -> Vec<Signal> {
     let prev_q_long = score_quality_long(&f_prev);
 
     // 多头2K反转: 前一根空头信号K + 当前多头信号K
-    if prev_q_short >= Q_MIN && q_long >= Q_MIN {
+    if prev_q_short >= SIGNAL_BAR_Q_MIN
+        && q_long >= SIGNAL_BAR_Q_MIN
+        && (!SIGNAL_BAR_REQUIRE_PATTERN_CONTEXT
+            || signal_bar_context_allows("long", &context, long_f_ratio_flipped))
+    {
         return vec![make_signal(
             "long",
             q_long.min(prev_q_short),
             "pa_pattern",
-            format!(
-                "2K reversal long: prev_q_short={:.1} curr_q_long={:.1}",
-                prev_q_short, q_long
-            ),
+            "2k_reversal",
+            "2K反转",
             json!({"type": "2k_reversal", "direction": "long"}),
         )];
     }
     // 空头2K反转: 前一根多头信号K + 当前空头信号K
-    if prev_q_long >= Q_MIN && q_short >= Q_MIN {
+    if prev_q_long >= SIGNAL_BAR_Q_MIN
+        && q_short >= SIGNAL_BAR_Q_MIN
+        && (!SIGNAL_BAR_REQUIRE_PATTERN_CONTEXT
+            || signal_bar_context_allows("short", &context, short_f_ratio_flipped))
+    {
         return vec![make_signal(
             "short",
             q_short.min(prev_q_long),
             "pa_pattern",
-            format!(
-                "2K reversal short: prev_q_long={:.1} curr_q_short={:.1}",
-                prev_q_long, q_short
-            ),
+            "2k_reversal",
+            "2K反转",
             json!({"type": "2k_reversal", "direction": "short"}),
         )];
     }
 
     // ---- 优先级2: 吞噬线 ----
     // 多头吞噬
-    if curr.high > prev.high && curr.low < prev.low && curr.close > curr.open && f_curr.p_b >= 0.5 {
+    if curr.high > prev.high
+        && curr.low < prev.low
+        && curr.close > curr.open
+        && f_curr.p_b >= 0.5
+        && (!SIGNAL_BAR_REQUIRE_PATTERN_CONTEXT
+            || signal_bar_context_allows("long", &context, long_f_ratio_flipped))
+    {
         return vec![make_signal(
             "long",
             0.6,
             "pa_pattern",
-            format!("bullish engulfing: p_b={:.2}", f_curr.p_b),
+            "engulfing",
+            "吞噬形态",
             json!({"type": "engulfing", "direction": "bullish"}),
         )];
     }
     // 空头吞噬
-    if curr.high > prev.high && curr.low < prev.low && curr.close < curr.open && f_curr.p_b >= 0.5 {
+    if curr.high > prev.high
+        && curr.low < prev.low
+        && curr.close < curr.open
+        && f_curr.p_b >= 0.5
+        && (!SIGNAL_BAR_REQUIRE_PATTERN_CONTEXT
+            || signal_bar_context_allows("short", &context, short_f_ratio_flipped))
+    {
         return vec![make_signal(
             "short",
             0.6,
             "pa_pattern",
-            format!("bearish engulfing: p_b={:.2}", f_curr.p_b),
+            "engulfing",
+            "吞噬形态",
             json!({"type": "engulfing", "direction": "bearish"}),
         )];
     }
 
     // ---- 优先级3: 惊喜K线 ----
-    let surprise_start = klines.len().saturating_sub(SURPRISE_LOOKBACK);
+    let surprise_start = klines.len().saturating_sub(SIGNAL_BAR_SURPRISE_LOOKBACK);
     let r_max = klines[surprise_start..curr_idx]
         .iter()
         .map(|k| k.high - k.low)
         .fold(0.0_f64, f64::max);
     if r_max > 0.0 && f_curr.range > 1.5 * r_max && f_curr.p_b >= 0.5 {
         let direction = if f_curr.body > 0.0 { "long" } else { "short" };
+        let f_ratio_flipped = if direction == "long" {
+            long_f_ratio_flipped
+        } else {
+            short_f_ratio_flipped
+        };
+        if SIGNAL_BAR_REQUIRE_PATTERN_CONTEXT
+            && !signal_bar_context_allows(direction, &context, f_ratio_flipped)
+        {
+            return Vec::new();
+        }
         return vec![make_signal(
             direction,
             0.6,
             "pa_pattern",
-            format!(
-                "surprise bar: range={:.4} r_max={:.4} ratio={:.2}",
-                f_curr.range,
-                r_max,
-                f_curr.range / r_max
-            ),
+            "surprise_bar",
+            "惊喜K线",
             json!({"type": "surprise_bar", "direction": direction, "range": (f_curr.range * 10000.0).round() / 10000.0, "r_max": (r_max * 10000.0).round() / 10000.0}),
         )];
     }
 
     // ---- 优先级4: 常规信号K线 ----
-    let context = evaluate_context(klines, &indicators);
-
     // 多头常规信号
-    if q_long >= Q_MIN && context.is_valid {
-        let f_ratio_flipped = {
-            let prev_f = compute_prev_f_ratio(klines, 5, 5);
-            context.f_ratio.signum() != prev_f.signum() && prev_f < 0.0
-        };
-        if context.f_ratio > 0.0 || f_ratio_flipped {
+    if q_long >= SIGNAL_BAR_Q_MIN && context.is_valid {
+        if signal_bar_context_allows("long", &context, long_f_ratio_flipped) {
             return vec![make_signal(
                 "long",
                 q_long,
                 "pa_signal_bar",
-                format!(
-                    "signal bar long: q={:.1} cr={:.2} f_ratio={:.2}",
-                    q_long, context.cr, context.f_ratio
-                ),
+                "signal_bar",
+                "常规信号K",
                 json!({
                     "type": "signal_bar",
                     "context": {
@@ -3049,7 +3515,7 @@ fn detect_signal_bar(klines: &[Kline]) -> Vec<Signal> {
                         "trend_dir": context.trend_dir,
                         "f_ratio": context.f_ratio,
                         "is_valid": context.is_valid,
-                        "f_ratio_flipped": f_ratio_flipped,
+                        "f_ratio_flipped": long_f_ratio_flipped,
                     },
                 }),
             )];
@@ -3057,20 +3523,14 @@ fn detect_signal_bar(klines: &[Kline]) -> Vec<Signal> {
     }
 
     // 空头常规信号
-    if q_short >= Q_MIN && context.is_valid {
-        let f_ratio_flipped = {
-            let prev_f = compute_prev_f_ratio(klines, 5, 5);
-            context.f_ratio.signum() != prev_f.signum() && prev_f > 0.0
-        };
-        if context.f_ratio < 0.0 || f_ratio_flipped {
+    if q_short >= SIGNAL_BAR_Q_MIN && context.is_valid {
+        if signal_bar_context_allows("short", &context, short_f_ratio_flipped) {
             return vec![make_signal(
                 "short",
                 q_short,
                 "pa_signal_bar",
-                format!(
-                    "signal bar short: q={:.1} cr={:.2} f_ratio={:.2}",
-                    q_short, context.cr, context.f_ratio
-                ),
+                "signal_bar",
+                "常规信号K",
                 json!({
                     "type": "signal_bar",
                     "context": {
@@ -3078,7 +3538,7 @@ fn detect_signal_bar(klines: &[Kline]) -> Vec<Signal> {
                         "trend_dir": context.trend_dir,
                         "f_ratio": context.f_ratio,
                         "is_valid": context.is_valid,
-                        "f_ratio_flipped": f_ratio_flipped,
+                        "f_ratio_flipped": short_f_ratio_flipped,
                     },
                 }),
             )];
@@ -3211,8 +3671,12 @@ async fn init_db(database_url: &str) -> Result<()> {
         reason TEXT NOT NULL DEFAULT '',
         evidence_json TEXT NOT NULL DEFAULT '{}',
         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(market, symbol, interval, signal_date, signal_type)
+        UNIQUE(market, symbol, interval, signal_date, signal_type, direction)
     )
+    "#,
+        r#"
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_pa_signal_identity_v2
+    ON pa_signal(market, symbol, interval, signal_date, signal_type, direction)
     "#,
         r#"
     CREATE TABLE IF NOT EXISTS pa_backtest_runs (
@@ -3636,8 +4100,7 @@ fn postgres_upsert_signal_sql() -> &'static str {
         target_price, reason, evidence_json
     )
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-    ON CONFLICT(market, symbol, interval, signal_date, signal_type) DO UPDATE SET
-        direction=excluded.direction,
+    ON CONFLICT(market, symbol, interval, signal_date, signal_type, direction) DO UPDATE SET
         score=excluded.score,
         ema20_entry_score=excluded.ema20_entry_score,
         ema20=excluded.ema20,
@@ -3681,7 +4144,25 @@ mod tests {
         let indicators = compute_indicators(&bars);
         assert!(indicators.ema20.is_some());
         assert!(indicators.atr14.is_some());
+        assert!(indicators.atr20.is_some());
         assert!(indicators.ema20_position.is_some());
+    }
+
+    #[test]
+    fn resolve_model_selects_requested_model() {
+        let breakout = resolve_model("pa_breakout_v2").unwrap();
+        assert_eq!(breakout.code(), "pa_breakout_v2");
+        assert_eq!(breakout.name(), "pricedog_pa_breakout");
+
+        let signal_bar = resolve_model("pa_signal_bar_v1").unwrap();
+        assert_eq!(signal_bar.code(), "pa_signal_bar_v1");
+        assert_eq!(signal_bar.name(), "pricedog_pa_signal_bar");
+
+        assert!(resolve_model("missing_model").is_err());
+
+        let ema20 = resolve_model("pa_ema20_cross_v1").unwrap();
+        assert_eq!(ema20.code(), "pa_ema20_cross_v1");
+        assert_eq!(ema20.min_klines(), 22);
     }
 
     #[test]
@@ -3856,14 +4337,18 @@ mod tests {
     fn overextended_position_reduces_ema20_entry_v2() {
         let moderate = Indicators {
             ema20: Some(100.0),
+            ema5: None,
             atr14: Some(10.0),
+            atr20: Some(10.0),
             ema20_position: Some(1.0),
             volume_ratio: None,
             amplitude: None,
         };
         let stretched = Indicators {
             ema20: Some(100.0),
+            ema5: None,
             atr14: Some(10.0),
+            atr20: Some(10.0),
             ema20_position: Some(3.0),
             volume_ratio: None,
             amplitude: None,
@@ -4095,13 +4580,40 @@ mod tests {
         assert_eq!(req.symbol, "BTCUSDT");
         assert_eq!(normalize_interval(&req.interval), "1h");
         assert_eq!(req.klines.len(), 2);
+        assert_eq!(req.model_code, "pa_breakout_v2");
         assert_eq!(req.max_holding_bars, default_max_holding_bars());
         assert_eq!(req.klines[0].ts, "2024-01-01T00:00:00Z");
     }
 
+    #[test]
+    fn evaluate_request_defaults_to_breakout_model() {
+        let payload = json!({
+            "market": "CRYPTO",
+            "symbol": "BTCUSDT"
+        });
+
+        let req: EvaluateRequest = serde_json::from_value(payload).unwrap();
+
+        assert_eq!(req.model_code, "pa_breakout_v2");
+    }
+
     // --- Signal Bar Model tests ---
 
-    /// 辅助: 生成一组基础K线数据（25根窄幅横盘）
+    /// 辅助: 生成上行趋势基础K线（逐步上涨，确保EMA5上穿EMA20用于测试金叉过滤）
+    fn make_trending_up_klines(count: usize) -> Vec<Kline> {
+        (0..count)
+            .map(|i| Kline {
+                ts: format!("2024-01-{:02}T00:00:00Z", i + 1),
+                open: if i < 10 { 100.0 } else { 100.0 + (i - 10) as f64 },
+                high: if i < 10 { 101.0 } else { 103.0 + (i - 10) as f64 },
+                low: if i < 10 { 99.0 } else { 99.0 + (i - 10) as f64 },
+                close: if i < 10 { 100.5 } else { 102.0 + (i - 10) as f64 },
+                volume: 1000.0,
+                turnover: 0.0,
+            })
+            .collect()
+    }
+
     fn make_base_klines(count: usize) -> Vec<Kline> {
         (0..count)
             .map(|i| Kline {
@@ -4251,27 +4763,87 @@ mod tests {
     }
 
     #[test]
+    fn signal_bar_context_uses_atr20_for_cr() {
+        let bars: Vec<Kline> = (0..10)
+            .map(|i| Kline {
+                ts: format!("2024-01-{:02}T00:00:00Z", i + 1),
+                open: 100.0,
+                high: 106.0,
+                low: 94.0,
+                close: 101.0,
+                volume: 1000.0,
+                turnover: 0.0,
+            })
+            .collect();
+        let indicators = Indicators {
+            ema20: Some(100.0),
+            ema5: None,
+            atr14: Some(2.0),
+            atr20: Some(10.0),
+            ema20_position: Some(0.1),
+            volume_ratio: None,
+            amplitude: None,
+        };
+
+        let context = evaluate_context(&bars, &indicators);
+
+        assert_relative_eq!(context.cr, 1.2);
+        assert!(context.is_valid);
+    }
+
+    #[test]
+    fn selected_models_do_not_mix_signals() {
+        let mut bars = make_trending_up_klines(24);
+        let prev_close = bars.last().map(|k| k.close).unwrap_or(100.0);
+        bars.push(Kline {
+            ts: "2024-01-25T00:00:00Z".to_string(),
+            open: prev_close + 4.0,
+            high: prev_close + 5.0,
+            low: prev_close - 1.0,
+            close: prev_close - 0.7,
+            volume: 1000.0,
+            turnover: 0.0,
+        });
+        bars.push(Kline {
+            ts: "2024-01-26T00:00:00Z".to_string(),
+            open: prev_close,
+            high: prev_close + 5.0,
+            low: prev_close - 1.0,
+            close: prev_close + 4.7,
+            volume: 1000.0,
+            turnover: 0.0,
+        });
+
+        let signal_bar = resolve_model("pa_signal_bar_v1").unwrap();
+        let breakout = resolve_model("pa_breakout_v2").unwrap();
+
+        assert_eq!(signal_bar.detect(&bars).len(), 1);
+        assert!(breakout.detect(&bars).is_empty());
+    }
+
+    #[test]
     fn signal_bar_检测2k多头反转() {
         // 前一根: 高质量空头信号K (body<0, p_b>=0.6, p_c<=0.15, p_d<=0.1)
         // 当前根: 高质量多头信号K (body>0, p_b>=0.6, p_c>=0.85, p_u<=0.1)
-        let mut bars = make_base_klines(24);
+        let mut bars = make_trending_up_klines(24);
+        let prev_close = bars.last().map(|k| k.close).unwrap_or(100.0);
         // 前一根空头信号K: O=104, H=105, L=99, C=99.3 (quality 1.0)
         bars.push(Kline {
             ts: "2024-01-25T00:00:00Z".to_string(),
-            open: 104.0,
-            high: 105.0,
-            low: 99.0,
-            close: 99.3,
+            open: prev_close + 4.0,
+            high: prev_close + 5.0,
+            low: prev_close - 1.0,
+            close: prev_close - 0.7,
             volume: 1000.0,
             turnover: 0.0,
         });
         // 当前多头信号K: O=100, H=105, L=99, C=104.7 (quality 1.0)
         bars.push(Kline {
             ts: "2024-01-26T00:00:00Z".to_string(),
-            open: 100.0,
-            high: 105.0,
-            low: 99.0,
-            close: 104.7,
+            open: prev_close,
+            high: prev_close + 5.0,
+            low: prev_close - 1.0,
+            close: prev_close + 4.7,
             volume: 1000.0,
             turnover: 0.0,
         });
@@ -4280,10 +4852,53 @@ mod tests {
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].signal_type, "pa_pattern");
         assert_eq!(signals[0].direction, "long");
-        assert!(signals[0].reason.contains("2K reversal"));
+        assert!(signals[0].reason.contains("盯盘提醒"));
+        assert_eq!(signals[0].evidence["alert_purpose"], "watchlist_monitor");
+        assert_eq!(signals[0].evidence["watch_alert"]["pattern_type"], "2k_reversal");
     }
 
     #[test]
+    fn signal_bar_检测ema20上穿公式() {
+        // 前20根收盘100 → EMA20稳定在100
+        // 第21根收盘100 = EMA20, 第22根收盘140 > EMA20 → 上穿
+        let bars: Vec<Kline> = (0..22)
+            .map(|i| Kline {
+                ts: format!("2024-01-{:02}T00:00:00Z", i+1), open: 90.0, high: 110.0, low: 90.0,
+                close: if i<20 { 100.0 } else if i==20 { 100.0 } else { 140.0 },
+                volume: 1000.0, turnover: 0.0,
+            }).collect();
+        let prev_closes: Vec<f64> = bars[..21].iter().map(|k| k.close).collect();
+        let prev_ema20 = *ema(&prev_closes, 20).last().unwrap();
+        assert!((prev_ema20 - 100.0).abs() < 1.0, "prev EMA20 should be ~100");
+        assert!(bars[20].close <= prev_ema20); // prev close <= prev ema20
+        assert!(bars[21].close > compute_indicators(&bars).ema20.unwrap()); // curr close > curr ema20
+    }
+    #[test]
+
+    fn signal_bar_检测ema20下穿公式() {
+        // 前20根收盘120 → EMA20稳定在120
+        // 第21根收盘120 = EMA20, 第22根收盘90 < EMA20 → 下穿
+        let bars: Vec<Kline> = (0..22)
+            .map(|i| Kline {
+                ts: format!("2024-01-{:02}T00:00:00Z", i+1), open: 130.0, high: 140.0, low: 110.0,
+                close: if i<20 { 120.0 } else if i==20 { 120.0 } else { 90.0 },
+                volume: 1000.0, turnover: 0.0,
+            }).collect();
+        let prev_closes: Vec<f64> = bars[..21].iter().map(|k| k.close).collect();
+        let prev_ema20 = *ema(&prev_closes, 20).last().unwrap();
+        assert!((prev_ema20 - 120.0).abs() < 1.0, "prev EMA20 should be ~120");
+        assert!(bars[20].close >= prev_ema20); // prev close >= prev ema20
+        assert!(bars[21].close < compute_indicators(&bars).ema20.unwrap()); // curr close < curr ema20
+    }
+
+    #[test]
+    fn signal_bar_横盘无ema20穿越() {
+        let bars = make_base_klines(26);
+        let signals = detect_signal_bar(&bars);
+        let no_cross = !signals.iter().any(|s| s.reason.contains("EMA20 cross"));
+        assert!(no_cross, "flat bars should not trigger EMA20 cross");
+    }
+
     fn signal_bar_检测吞噬线() {
         let mut bars = make_base_klines(24);
         // 前一根小阳线
@@ -4311,7 +4926,8 @@ mod tests {
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].signal_type, "pa_pattern");
         assert_eq!(signals[0].direction, "long");
-        assert!(signals[0].reason.contains("engulfing"));
+        assert!(signals[0].reason.contains("盯盘提醒"));
+        assert_eq!(signals[0].evidence["watch_alert"]["pattern_type"], "engulfing");
     }
 
     #[test]
@@ -4342,7 +4958,8 @@ mod tests {
         let signals = detect_signal_bar(&bars);
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].signal_type, "pa_pattern");
-        assert!(signals[0].reason.contains("surprise"));
+        assert!(signals[0].reason.contains("盯盘提醒"));
+        assert_eq!(signals[0].evidence["watch_alert"]["pattern_type"], "surprise_bar");
     }
 
     #[test]
@@ -4392,10 +5009,9 @@ mod tests {
         let stop = s.stop_loss.unwrap();
         let target = s.target_price.unwrap();
 
-        // entry > high (多头: H + δ)
-        assert!(entry > 103.0);
-        // stop < low (多头: L - δ)
-        assert!(stop < 98.0);
+        assert_relative_eq!(entry, 103.01);
+        assert_relative_eq!(stop, 97.99);
+        assert_relative_eq!(s.evidence["tick_size"].as_f64().unwrap(), 0.01);
         // target = entry + 2*(entry - stop)
         assert_relative_eq!(target, entry + 2.0 * (entry - stop), max_relative = 0.01);
     }

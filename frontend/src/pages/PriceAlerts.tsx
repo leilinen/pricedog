@@ -74,11 +74,11 @@ function conditionText(item: { type: string; op: string; value: number | [number
     turnover: '成交额',
     volume: '成交量',
     volume_ratio: '量比',
-    signal_bar: '信号K线',
-    pattern: '信号K线',
+    signal_bar: '盯盘K线提醒',
+    pattern: '盯盘K线提醒',
   }
   if (item.type === 'pattern' || item.type === 'signal_bar') {
-    const SIGNAL_LABEL: Record<string, string> = { '': '任意信号K', any: '任意信号K', pa_signal_bar: '常规信号K', pa_pattern: '特殊形态' }
+    const SIGNAL_LABEL: Record<string, string> = { '': '任意盯盘K线', any: '任意盯盘K线', pa_signal_bar: '常规信号K提醒', pa_pattern: '特殊形态提醒' }
     const sigLabel = SIGNAL_LABEL[String(item.value)] || String(item.value)
     const iv = item.interval ? ` (${item.interval})` : ''
     return `${TYPE_LABEL[item.type]}${iv} ${sigLabel}`
@@ -357,7 +357,7 @@ export default function PriceAlertsPage() {
         open={formOpen}
         onOpenChange={setFormOpen}
         title={editingId ? '编辑提醒规则' : '新建提醒规则'}
-        description="支持价格、涨跌幅、成交额、量比条件，支持 AND / OR 组合"
+        description="支持价格、涨跌幅、成交额、量比和盯盘K线提醒条件，支持 AND / OR 组合"
         stocks={stockOptions}
         channels={channels}
         initial={form}

@@ -28,7 +28,7 @@ COPY --from=builder /app/target/release/price-action-engine /usr/local/bin/price
 
 ENV PA_ENGINE_PORT=8001
 ENV DATABASE_URL=postgres://postgres:postgres@postgres:5432/pricedog
-ENV AKSHARE_ADAPTER_URL=http://akshare-adapter:8002
+ENV DATA_PROVIDER_URL=http://data-provider:8003
 
 EXPOSE 8001
 

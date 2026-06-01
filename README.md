@@ -2,7 +2,7 @@
 
 PriceDog 是一个基于 Price Action 裸 K 突破策略的行情监控和量化计算项目。项目 fork 自 PanWatch，保留其 Web UI、用户认证、通知、价格提醒和 AI Agent 基础能力，并新增 Rust 计算引擎负责行情数据、技术指标、突破识别和后续回测能力。
 
-当前开发重点是 crypto 实时数据获取和 EMA20 突破量化模型验证。A 股和美股数据源会接入同一 Rust Engine，但 A 股分钟线稳定性暂不作为当前优先级。
+当前开发重点是信号 K 线识别模型完善和回测引擎。Crypto 实时行情已稳定运行，EMA20 突破模型和信号 K 线模型已接入。
 
 ## 架构
 
@@ -11,13 +11,14 @@ PriceDog 使用 Docker Compose 部署多个轻量服务：
 | 服务 | 端口 | 职责 |
 | --- | --- | --- |
 | `panwatch` | `18000 -> 8000` | Web UI、用户认证、价格提醒、通知、AI Agent 编排 |
-| `price-action-engine` | `8001` | Rust 计算引擎，负责行情获取、K 线缓存、EMA20/ATR、突破信号、信号入库 |
-| `akshare-adapter` | 内部 `8002` | Python AkShare 适配器，提供股票数据 HTTP 接口 |
+| `price-action-engine` | `8001` | Rust 计算引擎，负责行情获取、K 线缓存、EMA/ATR 指标、突破信号和信号 K 线识别、回测 |
+| `data-provider` | `8003` | Rust 数据服务，统一提供股票行情、K 线、资金流向等数据 HTTP 接口（替代原 akshare-adapter） |
 | `postgres` | `15432 -> 5432` | 公共 PostgreSQL 服务，PriceDog 使用数据库 `pricedog` |
 
 设计原则：
 
 - Rust Engine 是核心行情和计算服务。
+- Data Provider 统一提供多市场行情数据，替代原 Python akshare-adapter。
 - PanWatch Python 层尽量只做 Web、规则、通知和 AI 编排。
 - PostgreSQL 是公共数据库服务，不绑定到单一应用；PriceDog 使用独立数据库名 `pricedog`。
 - 不再使用 SQLite。
@@ -31,14 +32,16 @@ PriceDog 使用 Docker Compose 部署多个轻量服务：
 - 股票数据：通过 `akshare-adapter` 获取，后续逐步完善。
 - K 线周期：`5m`、`15m`、`30m`、`1h`、`2h`、`4h`、`1d`。
 - 指标：
-  - EMA20，使用 close 序列计算。
-  - ATR14。
+  - EMA20 / EMA5，使用 close 序列计算。
+  - ATR14 / ATR20。
   - `ema20_position = (close - ema20) / atr14`。
   - 量比：当前成交量 / 前 20 根平均成交量。
   - 振幅。
-- 基础突破信号识别。
-- 价格提醒条件支持 `ema20_position` 和 `pattern`。
+- 基础突破信号识别（V2 三层漏斗模型）。
+- 信号 K 线识别模型（Signal Bar Model），支持盯盘 K 线实时提醒。
+- 价格提醒条件支持 `ema20_position`、`signal_bar` 和 `pattern`。
 - 数据源状态接口：查看 OKX WebSocket 连接状态、最近消息时间和最近闭合 K 线时间。
+- Data Provider：统一数据服务（Rust），提供股票行情、K 线、资金流向等接口。
 
 ## 快速启动
 
@@ -205,7 +208,7 @@ curl -X POST http://127.0.0.1:8001/api/v1/backtest \
 | `PANWATCH_PORT` | `18000` | Web UI 映射端口 |
 | `PRICE_ACTION_ENGINE_URL` | `http://127.0.0.1:8001` | Python 层访问 Rust Engine 的地址 |
 | `PA_ENGINE_PORT` | `8001` | Rust Engine 监听端口 |
-| `AKSHARE_ADAPTER_URL` | `http://127.0.0.1:8002` | 本地开发时 AkShare adapter 地址 |
+| `DATA_PROVIDER_URL` | `http://127.0.0.1:8003` | Data Provider 服务地址 |
 | `PA_CRYPTO_WS_ENABLED` | `true` | 是否启用 crypto WebSocket 采集 |
 | `PA_CRYPTO_WS_SYMBOLS` | `BTCUSDT,ETHUSDT` | WebSocket 订阅标的 |
 | `PA_CRYPTO_WS_INTERVALS` | `5m,1h,4h` | WebSocket 订阅 K 线周期 |
@@ -275,30 +278,32 @@ postgres://postgres:postgres@127.0.0.1:15432/pricedog
 Rust Engine 当前会初始化 PriceDog 自己需要的表：
 
 - `pa_kline`
+- `pa_quote`
 - `pa_signal`
+- `pa_backtest_runs`
 
 项目按“新项目直接 PostgreSQL 初始化”的方式开发，不保留 SQLite 迁移路径。
 
 ## 开发路线
 
-Phase 1：
+Phase 1（已完成）：
 
-- 完善 crypto WebSocket 采集。
-- 验证 EMA20 + ATR + 量价突破模型。
-- 完善数据源状态、缓存、异常降级。
-- 让价格提醒稳定接入 Rust Engine 指标。
+- Crypto WebSocket 采集（OKX ticker + candle）。
+- EMA20 + ATR + 量价突破模型（V2 三层漏斗）。
+- 信号 K 线识别模型（Signal Bar Model）。
+- 价格提醒接入 Rust Engine 指标和信号 K 线。
+- Data Provider 服务（Rust，替代 akshare-adapter）。
 
-Phase 2：
+Phase 2（进行中）：
 
-- 形态识别。
-- 更完整的 Price Action 场景分类。
-- Telegram 信号推送。
-
-Phase 3：
-
-- 回测引擎。
+- 回测引擎完善。
 - 绩效统计。
 - 前端回测页面。
+
+Phase 3（规划中）：
+
+- Telegram 信号推送。
+- 更多 Price Action 场景支持。
 
 ## 代码仓库
 

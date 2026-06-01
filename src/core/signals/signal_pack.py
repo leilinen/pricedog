@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from src.collectors.akshare_collector import AkshareCollector
 from src.collectors.kline_collector import KlineCollector
 from src.collectors.news_collector import NewsCollector, NewsItem
+from src.core.data_provider_client import get_data_provider
 from src.models.market import MarketCode
 from src.models.market import StockData
 
@@ -112,6 +113,60 @@ class SignalPackBuilder:
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
 
+    @staticmethod
+    def _build_kline_summary(klines: list[dict]) -> dict:
+        """Build a basic kline summary from data-provider kline data."""
+        if not klines:
+            return {"error": "无K线数据"}
+        last = klines[-1]
+        return {
+            "timeframe": "1d",
+            "asof": last.get("ts", ""),
+            "last_close": last.get("close"),
+            "klines": klines,
+        }
+
+    @staticmethod
+    def _build_capital_flow_summary(flow: dict) -> dict:
+        """Build capital flow summary from data-provider response."""
+        main_net = flow.get("main_net_inflow", 0)
+        main_pct = flow.get("main_net_inflow_pct", 0)
+        if main_net > 0:
+            if main_pct > 10:
+                status = "主力大幅流入"
+            elif main_pct > 5:
+                status = "主力明显流入"
+            else:
+                status = "主力小幅流入"
+        elif main_net < 0:
+            if main_pct < -10:
+                status = "主力大幅流出"
+            elif main_pct < -5:
+                status = "主力明显流出"
+            else:
+                status = "主力小幅流出"
+        else:
+            status = "主力资金平衡"
+
+        main_5d = flow.get("main_net_5d")
+        trend_5d = "无数据"
+        if main_5d is not None:
+            if main_5d > 0:
+                trend_5d = f"5日净流入{main_5d/1e8:.2f}亿"
+            else:
+                trend_5d = f"5日净流出{abs(main_5d)/1e8:.2f}亿"
+
+        return {
+            "status": status,
+            "main_net_inflow": main_net,
+            "main_net_inflow_pct": main_pct,
+            "super_net_inflow": flow.get("super_net_inflow", 0),
+            "big_net_inflow": flow.get("big_net_inflow", 0),
+            "mid_net_inflow": flow.get("mid_net_inflow", 0),
+            "small_net_inflow": flow.get("small_net_inflow", 0),
+            "trend_5d": trend_5d,
+        }
+
     async def build_for_symbols(
         self,
         *,
@@ -172,22 +227,31 @@ class SignalPackBuilder:
                         if not remaining:
                             break
                         try:
-                            if provider == "tencent":
-                                collector = AkshareCollector(market)
-                            else:
-                                logger.info(
-                                    f"SignalPack quote 未支持 provider={provider}，跳过"
-                                )
-                                continue
-
-                            stocks = await collector.get_stock_data(sorted(remaining))
-                            got = {s.symbol: s for s in stocks}
+                            dp = get_data_provider()
+                            items_batch = [{"symbol": s, "market": market.value} for s in sorted(remaining)]
+                            quotes = await dp.batch_quotes(items_batch)
+                            got = {q.get("symbol", ""): q for q in quotes if q.get("current_price", 0) > 0}
                             for sym in list(remaining):
-                                sd = got.get(sym)
-                                if not sd:
+                                q = got.get(sym)
+                                if not q:
                                     continue
+                                sd = StockData(
+                                    symbol=sym,
+                                    name=q.get("name", ""),
+                                    market=market,
+                                    current_price=q.get("current_price", 0),
+                                    change_pct=q.get("change_pct", 0),
+                                    change_amount=q.get("change_amount", 0),
+                                    volume=q.get("volume", 0),
+                                    turnover=q.get("turnover", 0),
+                                    open_price=q.get("open_price", 0),
+                                    high_price=q.get("high_price", 0),
+                                    low_price=q.get("low_price", 0),
+                                    prev_close=q.get("prev_close", 0),
+                                    timestamp=datetime.now(timezone.utc),
+                                )
                                 self._quote_cache[(market, sym)] = sd
-                                self._quote_source_cache[(market, sym)] = provider
+                                self._quote_source_cache[(market, sym)] = "data-provider"
                                 remaining.discard(sym)
                         except Exception as e:
                             logger.warning(
@@ -222,17 +286,20 @@ class SignalPackBuilder:
                         last_err = None
                         for provider, cfg in kline_providers:
                             try:
-                                if provider == "tencent":
-                                    collector = KlineCollector(market)
+                                dp = get_data_provider()
+                                klines = await dp.get_klines(market.value, sym, limit=120)
+                                if klines:
+                                    self._tech_cache[key] = self._build_kline_summary(klines)
+                                    self._tech_source_cache[key] = "data-provider"
+                                    last_err = None
+                                    break
                                 else:
-                                    logger.info(
-                                        f"SignalPack kline 未支持 provider={provider}，跳过"
-                                    )
-                                    continue
-                                self._tech_cache[key] = collector.get_kline_summary(sym)
-                                self._tech_source_cache[key] = provider
-                                last_err = None
-                                break
+                                    # Fallback to Python collector
+                                    collector = KlineCollector(market)
+                                    self._tech_cache[key] = collector.get_kline_summary(sym)
+                                    self._tech_source_cache[key] = provider
+                                    last_err = None
+                                    break
                             except Exception as e:
                                 last_err = e
                                 continue
@@ -245,7 +312,7 @@ class SignalPackBuilder:
                 if key in self._tech_cache and key not in self._tech_source_cache:
                     self._tech_source_cache[key] = "cache"
 
-        # 3) News
+        # 3) News — via data-provider
         news_by_symbol: dict[str, list[dict]] = {}
         if include_news:
             key = (
@@ -254,10 +321,9 @@ class SignalPackBuilder:
             )
             if key not in self._news_cache:
                 try:
-                    collector = NewsCollector.from_database()
-                    all_news = await collector.fetch_all(
-                        symbols=sorted(symbol_set),
-                        since_hours=news_hours,
+                    dp = get_data_provider()
+                    all_news = await dp.get_news(
+                        symbols=sorted(symbol_set), hours=news_hours, limit=50
                     )
                     self._news_cache[key] = all_news
                 except Exception as e:
@@ -265,22 +331,21 @@ class SignalPackBuilder:
                     self._news_cache[key] = []
 
             for it in self._news_cache[key]:
-                # attach to each symbol
-                for sym in it.symbols or []:
+                for sym in it.get("symbols") or []:
                     if sym not in symbol_set:
                         continue
                     news_by_symbol.setdefault(sym, []).append(
                         {
-                            "source": it.source,
-                            "external_id": it.external_id,
-                            "title": it.title,
-                            "time": it.publish_time.strftime("%Y-%m-%d %H:%M"),
-                            "importance": it.importance,
-                            "url": it.url,
+                            "source": it.get("source", ""),
+                            "external_id": it.get("external_id", ""),
+                            "title": it.get("title", ""),
+                            "time": it.get("publish_time", "")[:16],
+                            "importance": it.get("importance", 0),
+                            "url": it.get("url", ""),
                         }
                     )
 
-        # 4) Capital flow (CN only)
+        # 4) Capital flow (CN only) — via data-provider
         flow_map: dict[str, dict] = {}
         if include_capital_flow:
             cn_symbols = [sym for sym, market, _ in symbols if market == MarketCode.CN]
@@ -293,11 +358,7 @@ class SignalPackBuilder:
                         flow_map[sym] = self._flow_cache[key]
                 else:
                     try:
-                        from src.collectors.capital_flow_collector import (
-                            CapitalFlowCollector,
-                        )
-
-                        collector = CapitalFlowCollector(MarketCode.CN)
+                        dp = get_data_provider()
                         for sym in cn_symbols:
                             key = (MarketCode.CN, sym)
                             if key in self._flow_cache:
@@ -306,36 +367,18 @@ class SignalPackBuilder:
                                     self._flow_source_cache[key] = "cache"
                                 continue
 
-                            last_err = None
-                            for provider, cfg in flow_providers:
-                                try:
-                                    if provider != "eastmoney":
-                                        logger.info(
-                                            f"SignalPack capital_flow 未支持 provider={provider}，跳过"
-                                        )
-                                        continue
-                                    self._flow_cache[key] = (
-                                        collector.get_capital_flow_summary(sym)
-                                    )
-                                    self._flow_source_cache[key] = provider
-                                    last_err = None
-                                    break
-                                except Exception as e:
-                                    last_err = e
-                                    continue
-
-                            if key not in self._flow_cache:
-                                self._flow_cache[key] = {
-                                    "error": str(last_err)
-                                    if last_err
-                                    else "获取资金流向失败"
-                                }
+                            flow_data = await dp.get_capital_flow("CN", sym)
+                            if flow_data:
+                                self._flow_cache[key] = self._build_capital_flow_summary(flow_data)
+                                self._flow_source_cache[key] = "data-provider"
+                            else:
+                                self._flow_cache[key] = {"error": "获取资金流向失败"}
                                 self._flow_source_cache.setdefault(key, "unavailable")
                             flow_map[sym] = self._flow_cache[key]
                     except Exception as e:
                         logger.warning(f"SignalPack capital_flow 采集失败: {e}")
 
-        # 5) Events
+        # 5) Events — via data-provider
         events_by_symbol: dict[str, list[dict]] = {}
         events_key = (",".join(sorted(symbol_set)), int(events_days))
         if include_events:
@@ -344,51 +387,31 @@ class SignalPackBuilder:
                     self._events_cache[events_key] = []
                     self._events_source_cache[events_key] = "disabled"
                 else:
-                    last_err = None
-                    used_provider = ""
-                    for provider, cfg in events_providers:
-                        if provider != "eastmoney":
-                            logger.info(
-                                f"SignalPack events 未支持 provider={provider}，跳过"
+                    try:
+                        dp = get_data_provider()
+                        items = await dp.get_events(
+                            symbols=sorted(symbol_set),
+                            days=int(events_days),
+                            limit=50,
+                        )
+                        packed: list[dict] = []
+                        for it in items:
+                            packed.append(
+                                {
+                                    "source": it.get("source", ""),
+                                    "external_id": it.get("external_id", ""),
+                                    "event_type": it.get("event_type", ""),
+                                    "title": it.get("title", ""),
+                                    "time": it.get("publish_time", "")[:16],
+                                    "importance": it.get("importance", 0),
+                                    "url": it.get("url", ""),
+                                    "symbols": it.get("symbols", []),
+                                }
                             )
-                            continue
-                        try:
-                            from src.collectors.events_collector import EventsCollector
-
-                            collector = EventsCollector.from_database()
-                            items = await collector.fetch_all(
-                                symbols=sorted(symbol_set),
-                                since_days=int(events_days),
-                            )
-
-                            packed: list[dict] = []
-                            for it in items:
-                                packed.append(
-                                    {
-                                        "source": it.source,
-                                        "external_id": it.external_id,
-                                        "event_type": it.event_type,
-                                        "title": it.title,
-                                        "time": it.publish_time.strftime(
-                                            "%Y-%m-%d %H:%M"
-                                        ),
-                                        "importance": it.importance,
-                                        "url": it.url,
-                                        "symbols": it.symbols,
-                                    }
-                                )
-
-                            self._events_cache[events_key] = packed
-                            used_provider = provider
-                            self._events_source_cache[events_key] = used_provider
-                            last_err = None
-                            break
-                        except Exception as e:
-                            last_err = e
-                            continue
-
-                    if events_key not in self._events_cache:
-                        logger.warning(f"SignalPack events 采集失败: {last_err}")
+                        self._events_cache[events_key] = packed
+                        self._events_source_cache[events_key] = "data-provider"
+                    except Exception as e:
+                        logger.warning(f"SignalPack events 采集失败: {e}")
                         self._events_cache[events_key] = []
                         self._events_source_cache[events_key] = "unavailable"
 

@@ -18,12 +18,15 @@ services:
       DOCKER: "1"
       PLAYWRIGHT_SKIP_BROWSER_INSTALL: ${PLAYWRIGHT_SKIP_BROWSER_INSTALL:-1}
       PRICE_ACTION_ENGINE_URL: http://price-action-engine:8001
+      DATA_PROVIDER_URL: http://data-provider:8003
     volumes:
       - pricedog-data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
       price-action-engine:
+        condition: service_healthy
+      data-provider:
         condition: service_healthy
     restart: unless-stopped
 
@@ -37,24 +40,42 @@ services:
     environment:
       PA_ENGINE_PORT: "8001"
       DATABASE_URL: ${PA_DATABASE_URL:-postgres://postgres:postgres@postgres:5432/pricedog}
-      AKSHARE_ADAPTER_URL: http://akshare-adapter:8002
+      DATA_PROVIDER_URL: http://data-provider:8003
       PA_CRYPTO_WS_ENABLED: ${PA_CRYPTO_WS_ENABLED:-true}
       PA_CRYPTO_WS_SYMBOLS: ${PA_CRYPTO_WS_SYMBOLS:-BTCUSDT,ETHUSDT}
       PA_CRYPTO_WS_INTERVALS: ${PA_CRYPTO_WS_INTERVALS:-5m,1h,4h}
       RUST_LOG: info
     depends_on:
-      akshare-adapter:
+      data-provider:
         condition: service_healthy
       postgres:
         condition: service_healthy
     restart: unless-stopped
 
-  akshare-adapter:
+  data-provider:
     build:
       context: .
-      dockerfile: akshare-adapter/Dockerfile
-    container_name: pricedog-akshare-adapter
+      dockerfile: data-provider/Dockerfile
+    container_name: pricedog-data-provider
+    ports:
+      - "8003:8003"
+    environment:
+      DP_PORT: "8003"
+      DP_DATABASE_URL: ${DP_DATABASE_URL:-postgres://postgres:postgres@postgres:5432/pricedog}
+      RUST_LOG: info
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
+
+  # akshare-adapter is deprecated — replaced by data-provider
+  # Uncomment only if needed for backward compatibility
+  # akshare-adapter:
+  #   build:
+  #     context: .
+  #     dockerfile: akshare-adapter/Dockerfile
+  #   container_name: pricedog-akshare-adapter
+  #   restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine
