@@ -115,7 +115,9 @@ async def _fetch_price_action_quote(market: MarketCode, symbol: str) -> dict | N
     return None
 
 
-async def _evaluate_price_action(market: MarketCode, symbol: str, interval: str = "1d") -> dict:
+async def _evaluate_price_action(
+    market: MarketCode, symbol: str, interval: str = "1d", *, model_code: str = ""
+) -> dict:
     url = f"{_engine_url()}/api/v1/evaluate"
     payload = {
         "market": market.value,
@@ -124,6 +126,8 @@ async def _evaluate_price_action(market: MarketCode, symbol: str, interval: str 
         "klines": [],
         "persist_signal": False,
     }
+    if model_code:
+        payload["model_code"] = model_code
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(url, json=payload)
@@ -183,15 +187,62 @@ class PriceAlertEngine:
                     out[(market.value, sym)] = q
         return out
 
+    async def _fetch_signals(
+        self, market: MarketCode, symbol: str, interval: str
+    ) -> list[dict]:
+        """实时调用 evaluate API (SignalBarModel) 检测信号 K 线，DB 查询作为补充。"""
+        # 1. 实时 evaluate — 用 SignalBarModel 对当前 K 线做信号检测
+        ev = await self._evaluate_price_action_cached(
+            market, symbol, interval, model_code="pa_signal_bar_v1"
+        )
+        if ev.get("ok") and ev.get("signals"):
+            return ev.get("signals") or []
+
+        # 2. 兜底：从 pa_signal 表查最近 2 小时的历史信号
+        from datetime import timedelta
+        cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=2)
+        cutoff_str = cutoff_dt.strftime("%Y-%m-%dT%H:%M")
+
+        signals: list[dict] = []
+        try:
+            from src.web.database import SessionLocal
+            from sqlalchemy import text
+            with SessionLocal() as session:
+                rows = session.execute(
+                    text(
+                        "SELECT signal_type, direction, score, reason, signal_date "
+                        "FROM pa_signal "
+                        "WHERE market = :m AND symbol = :s AND interval = :iv "
+                        "AND signal_date > :cutoff "
+                        "ORDER BY id DESC LIMIT 5"
+                    ),
+                    {"m": market.value, "s": symbol, "iv": interval, "cutoff": cutoff_str},
+                ).fetchall()
+                for r in rows:
+                    sig_date = str(r[4] or "")
+                    if sig_date:
+                        signals.append({
+                            "signal_type": r[0],
+                            "direction": r[1],
+                            "score": float(r[2]) if r[2] else 0,
+                            "reason": r[3],
+                            "signal_date": sig_date,
+                        })
+        except Exception as e:
+            logger.debug("pa_signal query failed for %s/%s: %s", market.value, symbol, e)
+
+        return signals
+
     async def _evaluate_price_action_cached(
-        self, market: MarketCode, symbol: str, interval: str = "1d"
+        self, market: MarketCode, symbol: str, interval: str = "1d",
+        *, model_code: str = ""
     ) -> dict:
-        key = f"{market.value}:{symbol}:{interval}"
+        key = f"{market.value}:{symbol}:{interval}:{model_code}"
         now = time.monotonic()
         cached = self._engine_eval_cache.get(key)
         if cached and now - cached[0] < self.engine_eval_ttl_sec:
             return cached[1]
-        result = await _evaluate_price_action(market, symbol, interval)
+        result = await _evaluate_price_action(market, symbol, interval, model_code=model_code)
         self._engine_eval_cache[key] = (now, result or {})
         return result or {}
 
@@ -239,20 +290,16 @@ class PriceAlertEngine:
             left = _safe_float(indicators.get("ema20_position"))
         elif ctype == "pattern":
             interval = str(_json_get(cond, "interval", "1d") or "1d")
-            ev = await self._evaluate_price_action_cached(market, symbol, interval)
-            if not ev.get("ok", False):
-                return False, {
-                    "type": ctype,
-                    "error": ev.get("error") or "engine_unavailable",
-                    "matched": False,
-                }
+            # 信号 K 线直接查 pa_signal 表（由 Rust engine 实时写入）
+            # 同时也跑 evaluate API 作为补充
+            signals = await self._fetch_signals(market, symbol, interval)
             target = str(value or "").strip()
-            signals = ev.get("signals") or []
             matched_signal = None
             for sig in signals:
                 if not isinstance(sig, dict):
                     continue
-                if not target or str(sig.get("signal_type") or "") == target:
+                sig_type = str(sig.get("signal_type") or "")
+                if not target or sig_type == target:
                     matched_signal = sig
                     break
             ok = matched_signal is not None

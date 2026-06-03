@@ -255,10 +255,54 @@ impl PriceActionModel for SignalBarModel {
     }
 }
 
+struct SignalBarModelCn;
+
+impl PriceActionModel for SignalBarModelCn {
+    fn code(&self) -> &str {
+        "pa_signal_bar_cn_v1"
+    }
+
+    fn name(&self) -> &str {
+        "pricedog_pa_signal_bar_cn"
+    }
+
+    fn version(&self) -> &str {
+        "v1"
+    }
+
+    fn min_klines(&self) -> usize {
+        25
+    }
+
+    fn detect(&self, klines: &[Kline]) -> Vec<Signal> {
+        detect_signal_bar_cn(klines)
+    }
+
+    fn backtest(
+        &self,
+        klines: &[Kline],
+        max_holding_bars: usize,
+        fee_bps: f64,
+        slippage_bps: f64,
+    ) -> Vec<BacktestTrade> {
+        // A 股只模拟做多交易，空头信号仅作为盯盘提醒不计入交易
+        backtest_trades_from_model_long_only(self, klines, max_holding_bars, fee_bps, slippage_bps)
+    }
+
+    fn generate_candidates(
+        &self,
+        klines: &[Kline],
+        max_candidates: usize,
+    ) -> Vec<SampleCandidate> {
+        generate_sample_candidates_from_model(self, klines, max_candidates)
+    }
+}
+
 fn resolve_model(model_code: &str) -> Result<Box<dyn PriceActionModel>> {
     match model_code.trim() {
         "" | "pa_breakout_v2" | "pricedog_pa_breakout" => Ok(Box::new(V2Model)),
         "pa_signal_bar_v1" | "pricedog_pa_signal_bar" => Ok(Box::new(SignalBarModel)),
+        "pa_signal_bar_cn_v1" | "pricedog_pa_signal_bar_cn" => Ok(Box::new(SignalBarModelCn)),
         "pa_ema20_cross_v1" | "pricedog_pa_ema20_cross" => Ok(Box::new(Ema20CrossModel)),
         other => Err(anyhow!("unknown model_code: {}", other)),
     }
@@ -571,6 +615,7 @@ async fn main() -> Result<()> {
     });
     start_crypto_ws_collectors(state.clone());
     start_crypto_kline_backfill_monitor(state.clone());
+    start_stock_kline_backfill_monitor(state.clone());
 
     let app = Router::new()
         .route("/api/v1/health", get(health))
@@ -921,6 +966,155 @@ fn crypto_backfill_reason(bars: &[Kline], interval: &str) -> Option<String> {
         return Some(format!("gaps:{gaps}"));
     }
     None
+}
+
+// ── Stock K-line backfill ──────────────────────────────────
+
+/// K-line condition types that require pa_kline data in Rust engine.
+const KLINE_CONDITION_TYPES: &[&str] = &["volume_ratio", "ema20_position", "pattern"];
+
+/// A task discovered from active price alert rules.
+struct StockKlineTask {
+    market: String,
+    symbol: String,
+    interval: String,
+}
+
+/// Query the database to discover which (market, symbol, interval) combinations
+/// need K-line data. Scans enabled price_alert_rules joined with stocks,
+/// extracts conditions of type volume_ratio/ema20_position/pattern and their intervals.
+async fn discover_stock_kline_tasks(state: &AppState) -> Result<Vec<StockKlineTask>> {
+    let client = postgres_client(&state.db_url).await?;
+    let rows = client
+        .query(
+            r#"
+            SELECT s.market, s.symbol, r.condition_group
+            FROM price_alert_rules r
+            JOIN stocks s ON r.stock_id = s.id
+            WHERE r.enabled = true
+              AND s.market IN ('CN', 'HK', 'US')
+            "#,
+            &[],
+        )
+        .await?;
+
+    let mut tasks = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for row in &rows {
+        let market: String = row.get(0);
+        let symbol: String = row.get(1);
+        let cg_str: String = row.get(2);
+        let cg_json: serde_json::Value = serde_json::from_str(&cg_str).unwrap_or(serde_json::Value::Null);
+
+        let items = cg_json
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for item in &items {
+            let ctype = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if !KLINE_CONDITION_TYPES.contains(&ctype) {
+                continue;
+            }
+            let interval = item
+                .get("interval")
+                .and_then(|v| v.as_str())
+                .unwrap_or("1d");
+            let interval = normalize_interval(interval);
+            let key = format!("{}:{}:{}", market, symbol, interval);
+            if seen.insert(key) {
+                tasks.push(StockKlineTask {
+                    market: market.clone(),
+                    symbol: symbol.clone(),
+                    interval,
+                });
+            }
+        }
+    }
+    Ok(tasks)
+}
+
+fn start_stock_kline_backfill_monitor(state: Arc<AppState>) {
+    let enabled = env::var("PA_STOCK_BACKFILL_ENABLED")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false);
+    if !enabled {
+        info!("stock kline backfill monitor disabled");
+        return;
+    }
+    let poll_secs = env::var("PA_STOCK_BACKFILL_INTERVAL_SEC")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v >= 30)
+        .unwrap_or(300);
+    let lookback = env::var("PA_STOCK_BACKFILL_LOOKBACK")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v >= 10)
+        .unwrap_or(120);
+
+    info!("stock kline backfill starting: poll={}s lookback={}", poll_secs, lookback);
+
+    tokio::spawn(async move {
+        loop {
+            if let Err(err) = run_stock_kline_backfill_once(&state, lookback).await {
+                warn!("stock kline backfill failed: {err}");
+            }
+            sleep(Duration::from_secs(poll_secs)).await;
+        }
+    });
+}
+
+async fn run_stock_kline_backfill_once(
+    state: &AppState,
+    lookback: usize,
+) -> Result<()> {
+    let tasks = discover_stock_kline_tasks(state).await?;
+    if tasks.is_empty() {
+        return Ok(());
+    }
+
+    mark_provider_connected(state, "data-provider", "STOCK", "stock_backfill").await;
+    let mut updated = 0usize;
+    for task in &tasks {
+        // Check if we have fresh enough data already
+        let stored = load_klines_from_db(state, &task.market, &task.symbol, &task.interval, lookback).await?;
+        if has_usable_klines(stored.len(), lookback) {
+            if let Some(latest) = stored.first() {
+                if let Some(latest_ts) = parse_ts_millis(&latest.ts) {
+                    if let Some(expected) = expected_latest_closed_ts_millis(&task.interval) {
+                        if latest_ts + interval_millis(&task.interval).unwrap_or(0) >= expected {
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        match fetch_stock_klines(state, &task.market, &task.symbol, &task.interval, lookback + 2).await {
+            Ok(fetch) => {
+                if fetch.klines.is_empty() {
+                    continue;
+                }
+                persist_klines(state, &task.market, &task.symbol, &task.interval, &fetch.klines, &fetch.source).await?;
+                updated += fetch.klines.len();
+                info!(
+                    "stock kline backfill {} {} {} rows={}",
+                    task.market, task.symbol, task.interval, fetch.klines.len()
+                );
+            }
+            Err(err) => {
+                warn!("stock kline backfill {} {} {} failed: {}", task.market, task.symbol, task.interval, err);
+            }
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+    mark_provider_message(state, "data-provider", "STOCK", "stock_backfill").await;
+    if updated > 0 {
+        mark_provider_closed_kline(state, "data-provider", "STOCK", "stock_backfill").await;
+    }
+    Ok(())
 }
 
 async fn run_okx_ticker_ws_once(state: Arc<AppState>, symbols: &[String]) -> Result<()> {
@@ -1729,6 +1923,65 @@ fn backtest_trades_from_model(
     trades
 }
 
+/// A 股回测：只模拟做多交易，空头信号仅作为盯盘提醒（占用冷却期但不产生交易）
+fn backtest_trades_from_model_long_only(
+    model: &dyn PriceActionModel,
+    klines: &[Kline],
+    max_holding_bars: usize,
+    fee_bps: f64,
+    slippage_bps: f64,
+) -> Vec<BacktestTrade> {
+    if klines.len() < model.min_klines() {
+        return Vec::new();
+    }
+    let mut trades = Vec::new();
+    let mut last_long_idx: Option<usize> = None;
+    let mut last_short_idx: Option<usize> = None;
+    for current_idx in model.min_klines() - 1..klines.len() {
+        let window = &klines[..=current_idx];
+        for signal in model.detect(window) {
+            if signal_bar_cooldown_blocks(model.code(), current_idx, &signal.direction, last_long_idx, last_short_idx) {
+                continue;
+            }
+            remember_signal_idx(&signal.direction, current_idx, &mut last_long_idx, &mut last_short_idx);
+            // A 股只模拟做多，空头信号仅作为盯盘提醒
+            if signal.direction != "long" {
+                continue;
+            }
+            if let Some(trade) = simulate_backtest_trade(
+                klines,
+                current_idx,
+                &signal,
+                max_holding_bars,
+                fee_bps,
+                slippage_bps,
+            ) {
+                let curr = &klines[current_idx];
+                trades.push(BacktestTrade {
+                    ts: curr.ts.clone(),
+                    direction: signal.direction.clone(),
+                    signal_type: signal.signal_type.clone(),
+                    score: signal.score,
+                    entry_price: trade.0,
+                    stop_loss: signal.stop_loss,
+                    target_price: signal.target_price,
+                    exit_ts: trade.1.ts.clone(),
+                    exit_price: trade.2,
+                    exit_reason: trade.3.clone(),
+                    holding_bars: trade.4,
+                    return_pct: trade.5,
+                    hit_target: trade.3 == "hit_target",
+                    hit_stop: trade.3 == "hit_stop",
+                    signal: signal.signal_type.clone(),
+                    reason: signal.reason.clone(),
+                    evidence: signal.evidence.clone(),
+                });
+            }
+        }
+    }
+    trades
+}
+
 fn signal_bar_cooldown_blocks(
     model_code: &str,
     current_idx: usize,
@@ -1736,7 +1989,14 @@ fn signal_bar_cooldown_blocks(
     last_long_idx: Option<usize>,
     last_short_idx: Option<usize>,
 ) -> bool {
-    if model_code != "pa_signal_bar_v1" || SIGNAL_BAR_COOLDOWN_BARS == 0 {
+    let cooldown = if model_code == "pa_signal_bar_cn_v1" {
+        AS_COOLDOWN_BARS
+    } else if model_code == "pa_signal_bar_v1" {
+        SIGNAL_BAR_COOLDOWN_BARS
+    } else {
+        return false;
+    };
+    if cooldown == 0 {
         return false;
     }
     let last_idx = if direction == "long" {
@@ -1744,7 +2004,7 @@ fn signal_bar_cooldown_blocks(
     } else {
         last_short_idx
     };
-    last_idx.is_some_and(|idx| current_idx.saturating_sub(idx) <= SIGNAL_BAR_COOLDOWN_BARS)
+    last_idx.is_some_and(|idx| current_idx.saturating_sub(idx) <= cooldown)
 }
 
 fn remember_signal_idx(
@@ -3176,11 +3436,11 @@ fn score_quality_long(f: &BarFeatures) -> f64 {
     if f.body <= 0.0 {
         return 0.0;
     }
-    if f.p_b >= 0.6 && f.p_c >= 0.85 && f.p_u <= 0.1 {
+    if f.p_b >= 0.55 && f.p_c >= 0.75 && f.p_u <= 0.15 {
         1.0
-    } else if f.p_b >= 0.4 && f.p_c >= 0.6 && f.p_u <= 0.25 {
+    } else if f.p_b >= 0.35 && f.p_c >= 0.55 && f.p_u <= 0.30 {
         0.6
-    } else if f.p_b >= 0.3 && f.p_c >= 0.5 {
+    } else if f.p_b >= 0.25 && f.p_c >= 0.45 {
         0.3
     } else {
         0.0
@@ -3192,11 +3452,11 @@ fn score_quality_short(f: &BarFeatures) -> f64 {
     if f.body >= 0.0 {
         return 0.0;
     }
-    if f.p_b >= 0.6 && f.p_c <= 0.15 && f.p_d <= 0.1 {
+    if f.p_b >= 0.55 && f.p_c <= 0.25 && f.p_d <= 0.15 {
         1.0
-    } else if f.p_b >= 0.4 && f.p_c <= 0.4 && f.p_d <= 0.25 {
+    } else if f.p_b >= 0.35 && f.p_c <= 0.45 && f.p_d <= 0.30 {
         0.6
-    } else if f.p_b >= 0.3 && f.p_c <= 0.5 {
+    } else if f.p_b >= 0.25 && f.p_c <= 0.55 {
         0.3
     } else {
         0.0
@@ -3204,14 +3464,56 @@ fn score_quality_short(f: &BarFeatures) -> f64 {
 }
 
 /// SignalBarModel 主检测函数：识别最后一根K线是否为信号K线
-const SIGNAL_BAR_Q_MIN: f64 = 1.0;
-const SIGNAL_BAR_COOLDOWN_BARS: usize = 6;
+const SIGNAL_BAR_Q_MIN: f64 = 0.6;
+const SIGNAL_BAR_COOLDOWN_BARS: usize = 4;
 const SIGNAL_BAR_REQUIRE_PATTERN_CONTEXT: bool = true;
 const SIGNAL_BAR_REQUIRE_TREND_ALIGN: bool = true;
 const SIGNAL_BAR_USE_MA_CROSS: bool = false;
 const SIGNAL_BAR_MA_CROSS_LOOKBACK: usize = 24;
 const SIGNAL_BAR_SURPRISE_LOOKBACK: usize = 20;
 const SIGNAL_BAR_TICK_SIZE: f64 = 0.01;
+
+/// A 股信号 K 线参数（低波动市场适配）
+const AS_Q_MIN: f64 = 0.3;
+const AS_COOLDOWN_BARS: usize = 3;
+const AS_REQUIRE_PATTERN_CONTEXT: bool = true;
+const AS_REQUIRE_TREND_ALIGN: bool = false;
+const AS_SURPRISE_LOOKBACK: usize = 20;
+const AS_TICK_SIZE: f64 = 0.001;
+const AS_STOP_ATR_MULT: f64 = 1.2;
+const AS_TARGET_ATR_MULT: f64 = 1.5;
+
+/// A 股多头信号质量评分（放宽标准）
+fn score_quality_long_as(f: &BarFeatures) -> f64 {
+    if f.body <= 0.0 {
+        return 0.0;
+    }
+    if f.p_b >= 0.45 && f.p_c >= 0.65 && f.p_u <= 0.20 {
+        1.0
+    } else if f.p_b >= 0.30 && f.p_c >= 0.50 && f.p_u <= 0.35 {
+        0.6
+    } else if f.p_b >= 0.20 && f.p_c >= 0.40 {
+        0.3
+    } else {
+        0.0
+    }
+}
+
+/// A 股空头信号质量评分（放宽标准）
+fn score_quality_short_as(f: &BarFeatures) -> f64 {
+    if f.body >= 0.0 {
+        return 0.0;
+    }
+    if f.p_b >= 0.45 && f.p_c <= 0.35 && f.p_d <= 0.20 {
+        1.0
+    } else if f.p_b >= 0.30 && f.p_c <= 0.50 && f.p_d <= 0.35 {
+        0.6
+    } else if f.p_b >= 0.20 && f.p_c <= 0.60 {
+        0.3
+    } else {
+        0.0
+    }
+}
 
 fn signal_bar_trend_allows(direction: &str, context: &ContextResult) -> bool {
     if !SIGNAL_BAR_REQUIRE_TREND_ALIGN {
@@ -3531,6 +3833,257 @@ fn detect_signal_bar(klines: &[Kline]) -> Vec<Signal> {
                 "pa_signal_bar",
                 "signal_bar",
                 "常规信号K",
+                json!({
+                    "type": "signal_bar",
+                    "context": {
+                        "cr": context.cr,
+                        "trend_dir": context.trend_dir,
+                        "f_ratio": context.f_ratio,
+                        "is_valid": context.is_valid,
+                        "f_ratio_flipped": short_f_ratio_flipped,
+                    },
+                }),
+            )];
+        }
+    }
+
+    Vec::new()
+}
+
+// ---------------------------------------------------------------------------
+// A 股信号 K 线检测（低波动市场适配）
+// ---------------------------------------------------------------------------
+
+fn signal_bar_trend_allows_cn(direction: &str, context: &ContextResult) -> bool {
+    if !AS_REQUIRE_TREND_ALIGN {
+        return true;
+    }
+    (direction == "long" && context.trend_dir > 0)
+        || (direction == "short" && context.trend_dir < 0)
+}
+
+fn signal_bar_context_allows_cn(
+    direction: &str,
+    context: &ContextResult,
+    f_ratio_flipped: bool,
+) -> bool {
+    context.is_valid
+        && signal_bar_trend_allows_cn(direction, context)
+        && signal_bar_force_allows(direction, context, f_ratio_flipped)
+}
+
+/// A 股信号 K 线检测：放宽质量门槛，ATR-based 止损止盈
+fn detect_signal_bar_cn(klines: &[Kline]) -> Vec<Signal> {
+    const MIN_KLINES: usize = 25;
+
+    if klines.len() < MIN_KLINES {
+        return Vec::new();
+    }
+
+    let curr_idx = klines.len() - 1;
+    let prev_idx = curr_idx.saturating_sub(1);
+    let curr = &klines[curr_idx];
+    let prev = &klines[prev_idx];
+
+    let indicators = compute_indicators(klines);
+    let atr14 = indicators.atr14.unwrap_or(0.0);
+    let atr20 = indicators.atr20.unwrap_or(0.0);
+    let delta = AS_TICK_SIZE;
+
+    let f_curr = compute_bar_features(curr);
+    let f_prev = compute_bar_features(prev);
+
+    let q_long = score_quality_long_as(&f_curr);
+    let q_short = score_quality_short_as(&f_curr);
+    let context = evaluate_context(klines, &indicators);
+    let prev_f = compute_prev_f_ratio(klines, 5, 5);
+    let long_f_ratio_flipped = context.f_ratio.signum() != prev_f.signum() && prev_f < 0.0;
+    let short_f_ratio_flipped = context.f_ratio.signum() != prev_f.signum() && prev_f > 0.0;
+
+    let make_signal = |direction: &str,
+                       quality: f64,
+                       signal_type: &str,
+                       pattern_type: &str,
+                       pattern_label: &str,
+                       pattern_evidence: Value|
+     -> Signal {
+        // ATR-based 止损止盈
+        let (entry, stop, target) = if direction == "long" {
+            let e = curr.close + delta;
+            let risk = atr14 * AS_STOP_ATR_MULT;
+            let s = e - risk;
+            let t = e + atr14 * AS_TARGET_ATR_MULT;
+            (e, s, t)
+        } else {
+            let e = curr.close - delta;
+            let risk = atr14 * AS_STOP_ATR_MULT;
+            let s = e + risk;
+            let t = e - atr14 * AS_TARGET_ATR_MULT;
+            (e, s, t)
+        };
+        // A 股盯盘信号：看多提示买入机会，看空提示风险（减仓/止盈）
+        let (alert_hint, expected_use) = if direction == "long" {
+            ("bullish_watch", "看多提醒：关注买入机会，下一根K线确认后可考虑建仓/加仓")
+        } else {
+            ("bearish_watch", "看空提醒：注意风险，考虑减仓/止盈，A股不可做空")
+        };
+        Signal {
+            signal_type: signal_type.to_string(),
+            direction: direction.to_string(),
+            score: quality,
+            ema20_entry_score: 0.0,
+            entry_price: Some((entry * 10000.0).round() / 10000.0),
+            stop_loss: Some((stop * 10000.0).round() / 10000.0),
+            target_price: Some((target * 10000.0).round() / 10000.0),
+            reason: signal_bar_alert_reason(direction, pattern_label, quality, &context),
+            evidence: json!({
+                "model_code": "pa_signal_bar_cn_v1",
+                "alert_purpose": "watchlist_monitor",
+                "alert_semantics": "human_review_required",
+                "alert_level": signal_bar_alert_level(quality, pattern_type),
+                "watch_alert": {
+                    "alert_hint": alert_hint,
+                    "direction_hint": direction,
+                    "direction_label": signal_bar_direction_label(direction),
+                    "pattern_type": pattern_type,
+                    "pattern_label": pattern_label,
+                    "quality": quality,
+                    "expected_use": expected_use,
+                    "review_checklist": [
+                        "下一根K线是否延续并放量",
+                        "是否靠近前高/前低/EMA20/整数位等关键价位",
+                        "是否先出现反向1ATR级别波动",
+                        "若没有后续确认则忽略提醒"
+                    ],
+                    "reference_levels": {
+                        "signal_bar_high": (curr.high * 10000.0).round() / 10000.0,
+                        "signal_bar_low": (curr.low * 10000.0).round() / 10000.0,
+                        "atr14": (atr14 * 10000.0).round() / 10000.0,
+                    },
+                },
+                "bar_features": {
+                    "body": (f_curr.body * 10000.0).round() / 10000.0,
+                    "range": (f_curr.range * 10000.0).round() / 10000.0,
+                    "p_b": (f_curr.p_b * 100.0).round() / 100.0,
+                    "p_c": (f_curr.p_c * 100.0).round() / 100.0,
+                    "p_u": (f_curr.p_u * 100.0).round() / 100.0,
+                    "p_d": (f_curr.p_d * 100.0).round() / 100.0,
+                },
+                "q_long": q_long,
+                "q_short": q_short,
+                "atr14": (atr14 * 10000.0).round() / 10000.0,
+                "atr20": (atr20 * 10000.0).round() / 10000.0,
+                "tick_size": AS_TICK_SIZE,
+                "delta": (delta * 10000.0).round() / 10000.0,
+                "optimized_params": {
+                    "q_min": AS_Q_MIN,
+                    "cooldown_bars": AS_COOLDOWN_BARS,
+                    "require_pattern_context": AS_REQUIRE_PATTERN_CONTEXT,
+                    "require_trend_align": AS_REQUIRE_TREND_ALIGN,
+                },
+                "pattern": pattern_evidence,
+            }),
+        }
+    };
+
+    // ---- 优先级1: 2K反转 ----
+    let prev_q_short = score_quality_short_as(&f_prev);
+    let prev_q_long = score_quality_long_as(&f_prev);
+
+    if prev_q_short >= AS_Q_MIN
+        && q_long >= AS_Q_MIN
+        && (!AS_REQUIRE_PATTERN_CONTEXT
+            || signal_bar_context_allows_cn("long", &context, long_f_ratio_flipped))
+    {
+        return vec![make_signal(
+            "long", q_long.min(prev_q_short), "pa_pattern", "2k_reversal", "2K反转",
+            json!({"type": "2k_reversal", "direction": "long"}),
+        )];
+    }
+    if prev_q_long >= AS_Q_MIN
+        && q_short >= AS_Q_MIN
+        && (!AS_REQUIRE_PATTERN_CONTEXT
+            || signal_bar_context_allows_cn("short", &context, short_f_ratio_flipped))
+    {
+        return vec![make_signal(
+            "short", q_short.min(prev_q_long), "pa_pattern", "2k_reversal", "2K反转",
+            json!({"type": "2k_reversal", "direction": "short"}),
+        )];
+    }
+
+    // ---- 优先级2: 吞噬线 ----
+    if curr.high > prev.high
+        && curr.low < prev.low
+        && curr.close > curr.open
+        && f_curr.p_b >= 0.5
+        && (!AS_REQUIRE_PATTERN_CONTEXT
+            || signal_bar_context_allows_cn("long", &context, long_f_ratio_flipped))
+    {
+        return vec![make_signal(
+            "long", 0.6, "pa_pattern", "engulfing", "吞噬形态",
+            json!({"type": "engulfing", "direction": "bullish"}),
+        )];
+    }
+    if curr.high > prev.high
+        && curr.low < prev.low
+        && curr.close < curr.open
+        && f_curr.p_b >= 0.5
+        && (!AS_REQUIRE_PATTERN_CONTEXT
+            || signal_bar_context_allows_cn("short", &context, short_f_ratio_flipped))
+    {
+        return vec![make_signal(
+            "short", 0.6, "pa_pattern", "engulfing", "吞噬形态",
+            json!({"type": "engulfing", "direction": "bearish"}),
+        )];
+    }
+
+    // ---- 优先级3: 惊喜K线 ----
+    let surprise_start = klines.len().saturating_sub(AS_SURPRISE_LOOKBACK);
+    let r_max = klines[surprise_start..curr_idx]
+        .iter()
+        .map(|k| k.high - k.low)
+        .fold(0.0_f64, f64::max);
+    if r_max > 0.0 && f_curr.range > 1.5 * r_max && f_curr.p_b >= 0.5 {
+        let direction = if f_curr.body > 0.0 { "long" } else { "short" };
+        let f_ratio_flipped = if direction == "long" {
+            long_f_ratio_flipped
+        } else {
+            short_f_ratio_flipped
+        };
+        if AS_REQUIRE_PATTERN_CONTEXT
+            && !signal_bar_context_allows_cn(direction, &context, f_ratio_flipped)
+        {
+            return Vec::new();
+        }
+        return vec![make_signal(
+            direction, 0.6, "pa_pattern", "surprise_bar", "惊喜K线",
+            json!({"type": "surprise_bar", "direction": direction, "range": (f_curr.range * 10000.0).round() / 10000.0, "r_max": (r_max * 10000.0).round() / 10000.0}),
+        )];
+    }
+
+    // ---- 优先级4: 常规信号K线 ----
+    if q_long >= AS_Q_MIN && context.is_valid {
+        if signal_bar_context_allows_cn("long", &context, long_f_ratio_flipped) {
+            return vec![make_signal(
+                "long", q_long, "pa_signal_bar", "signal_bar", "常规信号K",
+                json!({
+                    "type": "signal_bar",
+                    "context": {
+                        "cr": context.cr,
+                        "trend_dir": context.trend_dir,
+                        "f_ratio": context.f_ratio,
+                        "is_valid": context.is_valid,
+                        "f_ratio_flipped": long_f_ratio_flipped,
+                    },
+                }),
+            )];
+        }
+    }
+
+    if q_short >= AS_Q_MIN && context.is_valid {
+        if signal_bar_context_allows_cn("short", &context, short_f_ratio_flipped) {
+            return vec![make_signal(
+                "short", q_short, "pa_signal_bar", "signal_bar", "常规信号K",
                 json!({
                     "type": "signal_bar",
                     "context": {
@@ -5014,5 +5567,78 @@ mod tests {
         assert_relative_eq!(s.evidence["tick_size"].as_f64().unwrap(), 0.01);
         // target = entry + 2*(entry - stop)
         assert_relative_eq!(target, entry + 2.0 * (entry - stop), max_relative = 0.01);
+    }
+
+    // ── Stock K-line backfill tests ──────────────────────────
+
+    #[test]
+    fn discover_tasks_extracts_kline_conditions_from_json() {
+        // Simulate a condition_group JSON with volume_ratio and ema20_position conditions
+        let cg = serde_json::json!({
+            "op": "and",
+            "items": [
+                {"type": "price", "op": ">", "value": 100},
+                {"type": "volume_ratio", "op": ">", "value": 2.0, "interval": "1d"},
+                {"type": "ema20_position", "op": ">", "value": 0.5, "interval": "5m"},
+                {"type": "change_pct", "op": ">", "value": 3.0},  // not a kline condition
+            ]
+        });
+
+        let items = cg.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let mut tasks = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for item in &items {
+            let ctype = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if !KLINE_CONDITION_TYPES.contains(&ctype) {
+                continue;
+            }
+            let interval = normalize_interval(item.get("interval").and_then(|v| v.as_str()).unwrap_or("1d"));
+            let key = format!("CN:600519:{}", interval);
+            if seen.insert(key) {
+                tasks.push(interval.clone());
+            }
+        }
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.contains(&"1d".to_string()));
+        assert!(tasks.contains(&"5m".to_string()));
+    }
+
+    #[test]
+    fn discover_tasks_defaults_interval_to_1d() {
+        let cg = serde_json::json!({
+            "items": [
+                {"type": "pattern", "value": "signal_bar"},
+            ]
+        });
+        let items = cg.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        for item in &items {
+            let ctype = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if KLINE_CONDITION_TYPES.contains(&ctype) {
+                let interval = normalize_interval(item.get("interval").and_then(|v| v.as_str()).unwrap_or("1d"));
+                assert_eq!(interval, "1d");
+            }
+        }
+    }
+
+    #[test]
+    fn discover_tasks_deduplicates_same_symbol_interval() {
+        let cg = serde_json::json!({
+            "items": [
+                {"type": "volume_ratio", "op": ">", "value": 2.0, "interval": "1d"},
+                {"type": "ema20_position", "op": ">", "value": 0.5, "interval": "1d"},
+            ]
+        });
+        let items = cg.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
+        let mut count = 0;
+        for item in &items {
+            let ctype = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if !KLINE_CONDITION_TYPES.contains(&ctype) { continue; }
+            let interval = normalize_interval(item.get("interval").and_then(|v| v.as_str()).unwrap_or("1d"));
+            if seen.insert(format!("CN:600519:{}", interval)) {
+                count += 1;
+            }
+        }
+        assert_eq!(count, 1);  // deduplicated to one (1d)
     }
 }
