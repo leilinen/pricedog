@@ -376,6 +376,8 @@ def _realtime_search(query: str, market: str = "", limit: int = 20) -> list[dict
             or code_raw.startswith("BJ")
         ):
             stock_market = "CN"
+        elif classify in ("Index", "Fund") and any(ch in security_type for ch in ("沪", "深", "北", "指")):
+            stock_market = "CN"
         elif classify == "HKStock" or "港" in security_type:
             stock_market = "HK"
         elif classify == "UsStock" or "美" in security_type:
