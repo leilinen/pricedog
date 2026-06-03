@@ -4,6 +4,10 @@ FROM rust:1-slim-bookworm AS builder
 
 WORKDIR /app
 
+# Use mirrors for faster crate downloads
+RUN mkdir -p /usr/local/cargo && \
+    echo '[source.crates-io]\nreplace-with = "ustc"\n[source.ustc]\nregistry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"' > /usr/local/cargo/config.toml
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
