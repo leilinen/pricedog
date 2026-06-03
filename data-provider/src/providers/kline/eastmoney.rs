@@ -2,24 +2,38 @@ use crate::models::kline::Kline;
 use crate::models::market::{eastmoney_secid, MarketCode};
 use crate::providers::quote::build_reqwest_client;
 
-/// Fetch daily K-lines from EastMoney API.
-/// Ported from Python: kline_collector.py::_fetch_eastmoney_klines
+/// Map normalized interval to EastMoney klt parameter.
+fn eastmoney_klt(interval: &str) -> Option<&'static str> {
+    match interval {
+        "1d" => Some("101"),
+        "5m" => Some("5"),
+        "15m" => Some("15"),
+        "30m" => Some("30"),
+        "1h" => Some("60"),
+        _ => None,
+    }
+}
+
+/// Fetch K-lines from EastMoney API.
+/// Supports daily and intraday intervals (5m, 15m, 30m, 1h) for CN/HK markets.
 pub async fn fetch_eastmoney_klines(
     symbol: &str,
     market: &MarketCode,
     days: usize,
+    interval: &str,
     http_proxy: Option<&str>,
 ) -> anyhow::Result<Vec<Kline>> {
     if !matches!(market, MarketCode::CN | MarketCode::HK) {
         return Ok(vec![]);
     }
+    let klt = eastmoney_klt(interval).unwrap_or("101");
 
     let secid = eastmoney_secid(symbol, market);
     let limit = days.max(1200).min(20000);
 
     let url = format!(
-        "https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={}&klt=101&fqt=1&lmt={}&end=20500101&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&ut=fa5fd1943c7b386f172d6893dbfba10b",
-        secid, limit
+        "https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={}&klt={}&fqt=1&lmt={}&end=20500101&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&ut=fa5fd1943c7b386f172d6893dbfba10b",
+        secid, klt, limit
     );
 
     let client = build_reqwest_client(http_proxy)?;
@@ -62,5 +76,20 @@ pub async fn fetch_eastmoney_klines(
         Ok(klines.split_off(klines.len() - days))
     } else {
         Ok(klines)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eastmoney_klt_maps_intervals() {
+        assert_eq!(eastmoney_klt("1d"), Some("101"));
+        assert_eq!(eastmoney_klt("5m"), Some("5"));
+        assert_eq!(eastmoney_klt("15m"), Some("15"));
+        assert_eq!(eastmoney_klt("30m"), Some("30"));
+        assert_eq!(eastmoney_klt("1h"), Some("60"));
+        assert_eq!(eastmoney_klt("unknown"), None);
     }
 }

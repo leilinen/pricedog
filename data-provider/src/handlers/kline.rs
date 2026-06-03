@@ -34,7 +34,7 @@ pub async fn get_klines(
     }
 
     let proxy = state.config.http_proxy.as_deref();
-    let klines = fetch_klines_with_fallback(&symbol, &mk, limit, proxy).await;
+    let klines = fetch_klines_with_fallback(&symbol, &mk, limit, &interval, proxy).await;
 
     let resp = KlineResponse {
         market: market.to_uppercase(),
@@ -57,9 +57,10 @@ async fn fetch_klines_with_fallback(
     symbol: &str,
     market: &MarketCode,
     days: usize,
+    interval: &str,
     proxy: Option<&str>,
 ) -> Vec<crate::models::kline::Kline> {
-    match tencent::fetch_tencent_klines(symbol, market, days, proxy).await {
+    match tencent::fetch_tencent_klines(symbol, market, days, interval, proxy).await {
         Ok(klines) if !klines.is_empty() => {
             // US: Stooq fallback if Tencent returns too few
             if matches!(market, MarketCode::US) && klines.len() < days.min(30).max(10) {
@@ -76,7 +77,7 @@ async fn fetch_klines_with_fallback(
             {
                 let em_days = days.max(3000).min(20000);
                 if let Ok(em) =
-                    eastmoney::fetch_eastmoney_klines(symbol, market, em_days, proxy).await
+                    eastmoney::fetch_eastmoney_klines(symbol, market, em_days, interval, proxy).await
                 {
                     if em.len() > klines.len() {
                         return tail(&em, days);
@@ -96,7 +97,7 @@ async fn fetch_klines_with_fallback(
             MarketCode::CN | MarketCode::HK => {
                 let em_days = days.max(3000).min(20000);
                 if let Ok(em) =
-                    eastmoney::fetch_eastmoney_klines(symbol, market, em_days, proxy).await
+                    eastmoney::fetch_eastmoney_klines(symbol, market, em_days, interval, proxy).await
                 {
                     return tail(&em, days);
                 }
