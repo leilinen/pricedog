@@ -15,8 +15,8 @@ import httpx
 
 BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
 OKX_HISTORY_CANDLES_URL = "https://www.okx.com/api/v5/market/history-candles"
-DEFAULT_AKSHARE_BASE_URL = os.environ.get("AKSHARE_ADAPTER_URL", "http://127.0.0.1:8002")
-DEFAULT_TIMEOUT = 10.0
+DEFAULT_DATA_PROVIDER_URL = os.environ.get("DATA_PROVIDER_URL", "http://127.0.0.1:8003")
+DEFAULT_TIMEOUT = 30.0
 BINANCE_LIMIT = 1000
 OKX_LIMIT = 100
 BACKTEST_DATA_SCHEMA_VERSION = "v1"
@@ -33,7 +33,7 @@ class FetchConfig:
     interval: str
     start_ms: int
     end_ms: int
-    akshare_base_url: str
+    data_provider_url: str
     timeout: float
 
 
@@ -74,9 +74,9 @@ def parse_args() -> argparse.Namespace:
         help="Output format. Default: json",
     )
     parser.add_argument(
-        "--akshare-base-url",
-        default=DEFAULT_AKSHARE_BASE_URL,
-        help=f"AkShare adapter base URL for stock data. Default: {DEFAULT_AKSHARE_BASE_URL}",
+        "--data-provider-url",
+        default=DEFAULT_DATA_PROVIDER_URL,
+        help=f"Data provider service URL for stock data. Default: {DEFAULT_DATA_PROVIDER_URL}",
     )
     parser.add_argument(
         "--timeout",
@@ -193,7 +193,7 @@ def build_config(args: argparse.Namespace) -> FetchConfig:
         interval=interval,
         start_ms=start_ms,
         end_ms=end_ms,
-        akshare_base_url=args.akshare_base_url.rstrip("/"),
+        data_provider_url=args.data_provider_url.rstrip("/"),
         timeout=float(args.timeout),
     )
 
@@ -341,12 +341,12 @@ def okx_inst_id(symbol: str) -> str:
 def fetch_stock_klines(client: httpx.Client, cfg: FetchConfig) -> list[dict[str, Any]]:
     step_ms = interval_millis(cfg.interval)
     approx_limit = max(32, ((cfg.end_ms - cfg.start_ms) // step_ms) + 4)
-    url = f"{cfg.akshare_base_url}/klines/{cfg.market}/{cfg.symbol}"
+    url = f"{cfg.data_provider_url}/api/v1/klines/{cfg.market}/{cfg.symbol}"
     resp = client.get(url, params={"interval": cfg.interval, "limit": approx_limit})
     resp.raise_for_status()
     payload = resp.json()
-    if not payload.get("success"):
-        raise RuntimeError(payload.get("error") or "akshare adapter request failed")
+    if payload.get("code") != 0:
+        raise RuntimeError(payload.get("message") or "data-provider request failed")
     data = payload.get("data") or {}
     klines = data.get("klines") or []
     rows = []
@@ -461,7 +461,7 @@ def main() -> int:
                 rows, source = fetch_crypto_klines(client, cfg)
             elif cfg.market in {"CN", "US", "HK"}:
                 rows = fetch_stock_klines(client, cfg)
-                source = "akshare-adapter"
+                source = "data-provider"
             else:
                 raise ValueError(f"unsupported market: {cfg.market}")
 
