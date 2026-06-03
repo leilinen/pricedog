@@ -84,6 +84,7 @@ def _validate_condition_group(group: AlertConditionGroup):
         "volume",
         "volume_ratio",
         "ema20_position",
+        "ema20_cross",
         "pattern",
     }
     allowed_ops = {">=", "<=", ">", "<", "==", "=", "!=", "<>", "between", "in"}
