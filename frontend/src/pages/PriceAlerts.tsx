@@ -76,6 +76,13 @@ function conditionText(item: { type: string; op: string; value: number | [number
     volume_ratio: '量比',
     signal_bar: '盯盘K线提醒',
     pattern: '盯盘K线提醒',
+    ema20_cross: 'EMA20穿越提醒',
+  }
+  if (item.type === 'ema20_cross') {
+    const DIR_LABEL: Record<string, string> = { '': '任意穿越', any: '任意穿越', up: '上穿看多', down: '下传看空' }
+    const dirLabel = DIR_LABEL[String(item.value)] || String(item.value)
+    const iv = item.interval ? ` (${item.interval})` : ''
+    return `EMA20穿越${iv} ${dirLabel}`
   }
   if (item.type === 'pattern' || item.type === 'signal_bar') {
     const SIGNAL_LABEL: Record<string, string> = { '': '任意盯盘K线', any: '任意盯盘K线', pa_signal_bar: '常规信号K提醒', pa_pattern: '特殊形态提醒' }

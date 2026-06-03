@@ -311,6 +311,37 @@ class PriceAlertEngine:
                 "matched": ok,
                 "signal": matched_signal,
             }
+        elif ctype == "ema20_cross":
+            interval = str(_json_get(cond, "interval", "1d") or "1d")
+            direction = str(value or "any").strip()
+            # 根据 market 选择 cn 或通用模型
+            model_code = "pa_ema20_cross_cn_v1" if market.value == "CN" else "pa_ema20_cross_v1"
+            ev = await self._evaluate_price_action_cached(
+                market, symbol, interval, model_code=model_code
+            )
+            signals = ev.get("signals") or []
+            matched_signal = None
+            for sig in signals:
+                if not isinstance(sig, dict):
+                    continue
+                sig_dir = str(sig.get("direction") or "")
+                if direction == "any" or direction == "up":
+                    if sig_dir == "long":
+                        matched_signal = sig
+                        break
+                if direction == "any" or direction == "down":
+                    if sig_dir == "short":
+                        matched_signal = sig
+                        break
+            ok = matched_signal is not None
+            return ok, {
+                "type": ctype,
+                "op": op or "==",
+                "target": direction,
+                "actual": matched_signal.get("direction") if matched_signal else None,
+                "matched": ok,
+                "signal": matched_signal,
+            }
         else:
             return False, {"type": ctype, "error": "unsupported_type"}
 
@@ -436,9 +467,30 @@ class PriceAlertEngine:
         hit_lines = []
         for h in snapshot.get("conditions") or []:
             if h.get("matched"):
-                hit_lines.append(
-                    f"- {h.get('type')} {h.get('op')} {h.get('target')} (当前: {h.get('actual')})"
-                )
+                ctype = h.get("type", "")
+                if ctype == "ema20_cross":
+                    sig = h.get("signal") or {}
+                    dir_label = {"long": "上穿看多", "short": "下传看空"}.get(str(h.get("actual")), str(h.get("actual")))
+                    evidence = sig.get("evidence") or {}
+                    watch = evidence.get("watch_alert") or {}
+                    hint = watch.get("alert_hint", "")
+                    expected = watch.get("expected_use", "")
+                    line = f"- EMA20{dir_label}"
+                    if expected:
+                        line += f"\n  {expected}"
+                    hit_lines.append(line)
+                elif ctype == "pattern":
+                    sig = h.get("signal") or {}
+                    dir_label = {"long": "看多", "short": "看空"}.get(str(sig.get("direction")), "")
+                    reason = sig.get("reason", "")
+                    line = f"- 信号K线 {dir_label}".strip()
+                    if reason:
+                        line += f"\n  {reason}"
+                    hit_lines.append(line)
+                else:
+                    hit_lines.append(
+                        f"- {ctype} {h.get('op')} {h.get('target')} (当前: {h.get('actual')})"
+                    )
         if hit_lines:
             lines.append("命中条件:")
             lines.extend(hit_lines[:4])

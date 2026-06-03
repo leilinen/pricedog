@@ -6,7 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Button } from '@panwatch/base-ui/components/ui/button'
 
 export type RuleOp = 'and' | 'or'
-export type ConditionType = 'price' | 'change_pct' | 'turnover' | 'volume' | 'volume_ratio' | 'signal_bar'
+export type ConditionType = 'price' | 'change_pct' | 'turnover' | 'volume' | 'volume_ratio' | 'signal_bar' | 'ema20_cross'
 export type ConditionOp = '>=' | '<=' | '>' | '<' | '==' | 'between'
 
 export interface AlertConditionItem {
@@ -66,12 +66,19 @@ const TYPE_LABEL: Record<ConditionType, string> = {
   volume: '成交量',
   volume_ratio: '量比',
   signal_bar: '盯盘K线提醒',
+  ema20_cross: 'EMA20穿越提醒',
 }
 
 const SIGNAL_BAR_OPTIONS = [
   { value: 'any', label: '任意盯盘K线' },
   { value: 'pa_signal_bar', label: '常规信号K提醒' },
   { value: 'pa_pattern', label: '特殊形态提醒' },
+]
+
+const EMA20_CROSS_OPTIONS = [
+  { value: 'any', label: '任意穿越' },
+  { value: 'up', label: 'EMA20上穿（看多）' },
+  { value: 'down', label: 'EMA20下传（看空）' },
 ]
 
 const INTERVAL_OPTIONS = [
@@ -149,10 +156,15 @@ export default function PriceAlertFormDialog(props: {
     if (!form.stock_id) return
     if (!form.items.length) return
     // 将 signal_bar 类型转换为后端 pattern 类型
+    // 将 ema20_cross 类型转换为后端 ema20_cross 类型
     const mappedItems = form.items.map(it => {
       if (it.type === 'signal_bar') {
         const backendValue = it.value === 'any' ? '' : String(it.value || '')
         return { ...it, type: 'pattern' as ConditionType, op: '==' as ConditionOp, value: backendValue, interval: it.interval || '1h' }
+      }
+      if (it.type === 'ema20_cross') {
+        const direction = it.value === 'any' ? '' : String(it.value || '')
+        return { ...it, type: 'ema20_cross' as ConditionType, op: '==' as ConditionOp, value: direction, interval: it.interval || '1h' }
       }
       return it
     })
@@ -431,6 +443,10 @@ export default function PriceAlertFormDialog(props: {
                       patch.op = '=='
                       patch.value = 'any'
                       patch.interval = '1h'
+                    } else if (v === 'ema20_cross') {
+                      patch.op = '=='
+                      patch.value = 'any'
+                      patch.interval = '1h'
                     } else if (typeof it.value === 'string') {
                       patch.op = '>='
                       patch.value = 0
@@ -452,6 +468,29 @@ export default function PriceAlertFormDialog(props: {
                         <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
                         <SelectContent>
                           {SIGNAL_BAR_OPTIONS.map(opt => (
+                            <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="col-span-4">
+                      <Select value={it.interval || '1h'} onValueChange={(v) => updateCond(idx, { interval: v })}>
+                        <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {INTERVAL_OPTIONS.map(opt => (
+                            <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </>
+                ) : it.type === 'ema20_cross' ? (
+                  <>
+                    <div className="col-span-3">
+                      <Select value={String(it.value || 'any')} onValueChange={(v) => updateCond(idx, { value: v })}>
+                        <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {EMA20_CROSS_OPTIONS.map(opt => (
                             <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
                           ))}
                         </SelectContent>
