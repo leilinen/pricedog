@@ -2,7 +2,7 @@
 
 PriceDog 是一个基于 Price Action 裸 K 突破策略的行情监控和量化计算项目。项目 fork 自 PanWatch，保留其 Web UI、用户认证、通知、价格提醒和 AI Agent 基础能力，并新增 Rust 计算引擎负责行情数据、技术指标、突破识别和后续回测能力。
 
-当前开发重点是信号 K 线识别模型完善和回测引擎。Crypto 实时行情已稳定运行，EMA20 突破模型和信号 K 线模型已接入。
+当前开发重点是 A 股盯盘模型完善和回测引擎。Crypto 实时行情已稳定运行，信号 K 线模型和 EMA20 穿越模型已接入 A 股盯盘。
 
 ## 架构
 
@@ -38,8 +38,9 @@ PriceDog 使用 Docker Compose 部署多个轻量服务：
   - 量比：当前成交量 / 前 20 根平均成交量。
   - 振幅。
 - 基础突破信号识别（V2 三层漏斗模型）。
-- 信号 K 线识别模型（Signal Bar Model），支持盯盘 K 线实时提醒。
-- 价格提醒条件支持 `ema20_position`、`signal_bar` 和 `pattern`。
+- 信号 K 线识别模型（Signal Bar Model），支持 A 股和通用市场盯盘 K 线实时提醒。
+- EMA20 穿越信号检测模型（EMA20 Cross Model），支持 A 股和通用市场 EMA20 上穿/下传提醒。
+- 价格提醒条件支持 `ema20_position`、`signal_bar`、`pattern` 和 `ema20_cross`。
 - 数据源状态接口：查看 OKX WebSocket 连接状态、最近消息时间和最近闭合 K 线时间。
 - Data Provider：统一数据服务（Rust），提供股票行情、K 线、资金流向等接口。
 
@@ -290,8 +291,9 @@ Phase 1（已完成）：
 
 - Crypto WebSocket 采集（OKX ticker + candle）。
 - EMA20 + ATR + 量价突破模型（V2 三层漏斗）。
-- 信号 K 线识别模型（Signal Bar Model）。
-- 价格提醒接入 Rust Engine 指标和信号 K 线。
+- 信号 K 线识别模型（Signal Bar Model），含 A 股专用模型 `pa_signal_bar_cn_v1`。
+- EMA20 穿越信号检测模型（EMA20 Cross Model），含 A 股专用模型 `pa_ema20_cross_cn_v1`。
+- 价格提醒接入 Rust Engine 指标、信号 K 线和 EMA20 穿越。
 - Data Provider 服务（Rust，替代 akshare-adapter）。
 
 Phase 2（进行中）：
