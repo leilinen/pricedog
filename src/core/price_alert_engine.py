@@ -483,8 +483,12 @@ class PriceAlertEngine:
                 elif ctype == "pattern":
                     sig = h.get("signal") or {}
                     dir_label = {"long": "看多", "short": "看空"}.get(str(sig.get("direction")), "")
+                    evidence = sig.get("evidence") or {}
+                    watch = evidence.get("watch_alert") or {}
+                    pattern_label = watch.get("pattern_type") or evidence.get("pattern_label") or ""
                     reason = sig.get("reason", "")
-                    line = f"- 信号K线 {dir_label}".strip()
+                    label = f"信号K线({pattern_label})" if pattern_label else "信号K线"
+                    line = f"- {label} {dir_label}".strip()
                     if reason:
                         line += f"\n  {reason}"
                     hit_lines.append(line)
