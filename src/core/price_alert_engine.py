@@ -191,9 +191,10 @@ class PriceAlertEngine:
         self, market: MarketCode, symbol: str, interval: str
     ) -> list[dict]:
         """实时调用 evaluate API (SignalBarModel) 检测信号 K 线，DB 查询作为补充。"""
-        # 1. 实时 evaluate — 用 SignalBarModel 对当前 K 线做信号检测
+        # 1. 实时 evaluate — 根据市场选择对应的信号K线模型
+        model_code = "pa_signal_bar_cn_v1" if market.value == "CN" else "pa_signal_bar_v1"
         ev = await self._evaluate_price_action_cached(
-            market, symbol, interval, model_code="pa_signal_bar_v1"
+            market, symbol, interval, model_code=model_code
         )
         if ev.get("ok") and ev.get("signals"):
             return ev.get("signals") or []
