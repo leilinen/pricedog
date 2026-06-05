@@ -275,6 +275,64 @@ pub struct StockKlineTask {
 }
 
 // ---------------------------------------------------------------------------
+// Evaluate-Rule — batch condition evaluation for price alerts
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct EvaluateRuleRequest {
+    pub market: String,
+    pub symbol: String,
+    #[serde(default = "default_interval")]
+    pub interval: String,
+    #[serde(default)]
+    pub quote: Option<QuoteInput>,
+    pub conditions: Vec<RuleCondition>,
+    #[serde(default = "default_group_op")]
+    pub group_op: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct QuoteInput {
+    #[serde(default)]
+    pub current_price: Option<f64>,
+    #[serde(default)]
+    pub change_pct: Option<f64>,
+    #[serde(default)]
+    pub turnover: Option<f64>,
+    #[serde(default)]
+    pub volume: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuleCondition {
+    #[serde(rename = "type")]
+    pub cond_type: String,
+    #[serde(default)]
+    pub op: String,
+    pub value: Value,
+    #[serde(default)]
+    pub interval: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConditionResult {
+    #[serde(rename = "type")]
+    pub cond_type: String,
+    pub op: String,
+    pub target: Value,
+    pub actual: Option<Value>,
+    pub matched: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+pub fn default_group_op() -> String {
+    "and".to_string()
+}
+
+// ---------------------------------------------------------------------------
 // Serde helpers
 // ---------------------------------------------------------------------------
 

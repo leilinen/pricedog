@@ -355,6 +355,69 @@ class PriceAlertEngine:
             "matched": ok,
         }
 
+    async def eval_rule_batch(
+        self, rule: PriceAlertRule, quote: dict
+    ) -> RuleEvalResult | None:
+        """One HTTP call to Rust engine to evaluate entire condition_group."""
+        cond_group = rule.condition_group or {}
+        items = cond_group.get("items") or []
+        if not isinstance(items, list) or not items:
+            return None
+
+        market = _to_market(rule.stock.market)
+        symbol = rule.stock.symbol
+        payload = {
+            "market": market.value,
+            "symbol": symbol,
+            "interval": "1d",
+            "quote": {
+                "current_price": _safe_float(quote.get("current_price")),
+                "change_pct": _safe_float(quote.get("change_pct")),
+                "turnover": _safe_float(quote.get("turnover")),
+                "volume": _safe_float(quote.get("volume")),
+            },
+            "conditions": [
+                {
+                    "type": c.get("type", ""),
+                    "op": c.get("op", ""),
+                    "value": c.get("value"),
+                    "interval": c.get("interval", "1d"),
+                }
+                for c in items
+                if isinstance(c, dict)
+            ],
+            "group_op": cond_group.get("op", "and"),
+        }
+        try:
+            url = f"{_engine_url()}/api/v1/evaluate-rule"
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+            if not data.get("ok"):
+                return None
+            results = data.get("results") or []
+            return RuleEvalResult(
+                matched=data.get("matched", False),
+                hits=results,
+                snapshot={
+                    "symbol": symbol,
+                    "market": market.value,
+                    "quote": {
+                        "current_price": _safe_float(quote.get("current_price")),
+                        "change_pct": _safe_float(quote.get("change_pct")),
+                        "turnover": _safe_float(quote.get("turnover")),
+                        "volume": _safe_float(quote.get("volume")),
+                    },
+                    "conditions": results,
+                    "group_op": cond_group.get("op", "and"),
+                    "source": "rust_engine_batch",
+                },
+            )
+        except Exception as e:
+            logger.debug(f"evaluate-rule batch failed, fallback: {e}")
+            return None
+
     async def eval_rule(self, rule: PriceAlertRule, quote: dict) -> RuleEvalResult:
         cond_group = rule.condition_group or {}
         op = str(cond_group.get("op", "and")).lower()
@@ -555,7 +618,9 @@ class PriceAlertEngine:
                     items.append({"rule_id": rule.id, "status": "gated", "reason": reason})
                     continue
 
-                ev = await self.eval_rule(rule, quote)
+                ev = await self.eval_rule_batch(rule, quote)
+                if ev is None:
+                    ev = await self.eval_rule(rule, quote)
                 if not ev.matched:
                     skipped += 1
                     items.append({"rule_id": rule.id, "status": "not_matched"})
