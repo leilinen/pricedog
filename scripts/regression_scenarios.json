@@ -1,0 +1,37 @@
+[
+  {
+    "data": "/tmp/btcusdt_1h_20260101_20260530.json",
+    "model": "pa_signal_bar_v1",
+    "market": "CRYPTO",
+    "symbol": "BTCUSDT",
+    "interval": "1h"
+  },
+  {
+    "data": "/tmp/btcusdt_1h_20260101_20260530.json",
+    "model": "pa_breakout_v2",
+    "market": "CRYPTO",
+    "symbol": "BTCUSDT",
+    "interval": "1h"
+  },
+  {
+    "data": "/tmp/hs300etf-1d.json",
+    "model": "pa_signal_bar_cn_v1",
+    "market": "CN",
+    "symbol": "HS300ETF",
+    "interval": "1d"
+  },
+  {
+    "data": "/tmp/hs300etf-1d.json",
+    "model": "pa_ema20_cross_cn_v1",
+    "market": "CN",
+    "symbol": "HS300ETF",
+    "interval": "1d"
+  },
+  {
+    "data": "/tmp/hs300etf-1h.json",
+    "model": "pa_signal_bar_cn_v1",
+    "market": "CN",
+    "symbol": "HS300ETF",
+    "interval": "1h"
+  }
+]

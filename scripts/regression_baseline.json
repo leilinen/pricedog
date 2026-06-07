@@ -1,0 +1,82 @@
+{
+  "BTCUSDT 1h + pa_signal_bar_v1": {
+    "model_code": "pa_signal_bar_v1",
+    "symbol": "BTCUSDT",
+    "interval": "1h",
+    "market": "CRYPTO",
+    "summary": {
+      "avg_holding_bars": 8.541152263374485,
+      "avg_return_pct": -0.44585591179645895,
+      "evaluated_count": 486,
+      "hit_stop_rate": 0.6748971193415638,
+      "hit_target_rate": 0.2839506172839506,
+      "median_return_pct": -0.7662039284523008,
+      "signal_count": 486,
+      "win_rate": 0.29218106995884774
+    }
+  },
+  "BTCUSDT 1h + pa_breakout_v2": {
+    "model_code": "pa_breakout_v2",
+    "symbol": "BTCUSDT",
+    "interval": "1h",
+    "market": "CRYPTO",
+    "summary": {
+      "avg_holding_bars": 15.709677419354838,
+      "avg_return_pct": 0.49311569183442977,
+      "evaluated_count": 124,
+      "hit_stop_rate": 0.3870967741935484,
+      "hit_target_rate": 0.5080645161290323,
+      "median_return_pct": 0.5884164224518086,
+      "signal_count": 124,
+      "win_rate": 0.5564516129032258
+    }
+  },
+  "HS300ETF 1d + pa_signal_bar_cn_v1": {
+    "model_code": "pa_signal_bar_cn_v1",
+    "symbol": "HS300ETF",
+    "interval": "1d",
+    "market": "CN",
+    "summary": {
+      "avg_holding_bars": 4.607843137254902,
+      "avg_return_pct": 0.15313439011723115,
+      "evaluated_count": 51,
+      "hit_stop_rate": 0.4117647058823529,
+      "hit_target_rate": 0.5686274509803921,
+      "median_return_pct": 1.1028853139727675,
+      "signal_count": 51,
+      "win_rate": 0.5686274509803921
+    }
+  },
+  "HS300ETF 1d + pa_ema20_cross_cn_v1": {
+    "model_code": "pa_ema20_cross_cn_v1",
+    "symbol": "HS300ETF",
+    "interval": "1d",
+    "market": "CN",
+    "summary": {
+      "avg_holding_bars": 5.7368421052631575,
+      "avg_return_pct": -0.2008189864211997,
+      "evaluated_count": 19,
+      "hit_stop_rate": 0.5263157894736842,
+      "hit_target_rate": 0.47368421052631576,
+      "median_return_pct": -1.784915057953421,
+      "signal_count": 19,
+      "win_rate": 0.47368421052631576
+    }
+  },
+  "HS300ETF 1h + pa_signal_bar_cn_v1": {
+    "model_code": "pa_signal_bar_cn_v1",
+    "symbol": "HS300ETF",
+    "interval": "1h",
+    "market": "CN",
+    "summary": {
+      "avg_holding_bars": 5.204081632653061,
+      "avg_return_pct": -0.3791011471027685,
+      "evaluated_count": 49,
+      "hit_stop_rate": 0.5714285714285714,
+      "hit_target_rate": 0.40816326530612246,
+      "median_return_pct": -0.943163855531708,
+      "signal_count": 49,
+      "win_rate": 0.40816326530612246
+    }
+  }
+}

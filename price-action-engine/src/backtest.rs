@@ -14,8 +14,8 @@ pub const SIGNAL_BAR_Q_MIN: f64 = 0.6;
 pub const SIGNAL_BAR_COOLDOWN_BARS: usize = 4;
 pub const SIGNAL_BAR_TICK_SIZE: f64 = 0.01;
 pub const AS_COOLDOWN_BARS: usize = 3;
-pub const AS_STOP_ATR_MULT: f64 = 0.8;
-pub const AS_TARGET_ATR_MULT: f64 = 2.5;
+pub const AS_STOP_ATR_MULT: f64 = 1.2;
+pub const AS_TARGET_ATR_MULT: f64 = 1.5;
 
 // ---------------------------------------------------------------------------
 // Shared backtest helpers

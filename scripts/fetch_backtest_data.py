@@ -749,6 +749,15 @@ def write_csv(rows: list[dict[str, Any]], output: str | None) -> None:
     writer.writerows(rows)
 
 
+# Patch socket.getaddrinfo early so httpx only resolves IPv4
+import socket as _socket
+
+_orig = _socket.getaddrinfo
+_socket.getaddrinfo = lambda h, p, f=0, *a, **kw: (
+    _orig(h, p, f if f != 0 else _socket.AF_INET, *a, **kw)
+)
+
+
 def main() -> int:
     try:
         args = parse_args()
